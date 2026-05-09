@@ -79,11 +79,20 @@ To use `osqueryi-mcp` with an MCP client (like Claude Desktop), add it to your c
 
 ### Testing
 
-An end-to-end test script is provided in Python using `uv`:
+An end-to-end test script is provided in Python using `uv`.
 
+### Basic Smoke Test
 ```bash
 uv run tools/test_mcp.py
 ```
+
+### Framework-Specific Examples
+These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using popular Python frameworks:
+
+- **Agno (Phidata)**: `uv run tools/agno_test_mcp.py`
+- **Strands (AWS)**: `uv run tools/strands_test_mcp.py`
+
+*Note: These require `OPENAI_API_KEY` or `GOOGLE_API_KEY` to be set.*
 
 To run with debug logging enabled and view the output:
 
@@ -91,6 +100,10 @@ To run with debug logging enabled and view the output:
 OSQUERYI_DEBUG=1 uv run tools/test_mcp.py
 tail -f osqueryi-mcp.log
 ```
+
+## Documentation & Guides
+
+- [Python MCP Client Development Guide](PYTHON_MCP_CLIENT.md): Technical reference for building Python clients with Agno, Strands, Microsoft Agent Framework, and Pydantic AI.
 
 ## License
 
