@@ -20,8 +20,8 @@ async def run_agno_mcp():
         model = OpenAIChat(id="gpt-5-mini")
         print("Using OpenAI model (gpt-5-mini)")
     elif os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
-        model = Gemini(id="gemini-1.5-flash")
-        print("Using Gemini model (gemini-1.5-flash)")
+        model = Gemini(id="gemini-3.1-flash-image-preview")
+        print("Using Gemini model (gemini-3.1-flash-image-preview)")
     else:
         print("Error: Neither OPENAI_API_KEY nor GOOGLE_API_KEY/GEMINI_API_KEY found in environment.")
         return
