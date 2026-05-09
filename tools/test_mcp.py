@@ -110,6 +110,19 @@ async def main():
     query_res = await recv_id(5)
     print("run_query result:", json.dumps(query_res, indent=2))
 
+    # 7. Call run_query with invalid SQL
+    await send({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {
+            "name": "run_query",
+            "arguments": {"sql": "SELECT * FROM non_existent_table"}
+        }
+    })
+    error_res = await recv_id(6)
+    print("run_query error result:", json.dumps(error_res, indent=2))
+
     # Cleanup
     process.terminate()
     await process.wait()

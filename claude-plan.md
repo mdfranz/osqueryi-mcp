@@ -32,7 +32,7 @@ Makefile
 | `OSQUERYI_TIMEOUT` | `30s` | Query timeout |
 | `OSQUERYI_LOCKFILE` | `osqueryi-mcp.lock` | PID lock path; `off` disables |
 | `OSQUERYI_DEBUG` | unset | Enable debug logging |
-| `OSQUERYI_LOGFILE` | unset | Log to file instead of stderr |
+| `OSQUERYI_LOGFILE` | `osqueryi-mcp.log` | Log to file instead of stderr |
 
 ## MCP Tools (3 total)
 

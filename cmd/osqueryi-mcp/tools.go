@@ -13,6 +13,13 @@ func registerTools(s *mcp.Server, e *Executor) {
 	listTablesTool := &mcp.Tool{
 		Name:        "list_tables",
 		Description: "List all available osquery tables",
+		InputSchema: struct {
+			Type       string `json:"type"`
+			Properties any    `json:"properties"`
+		}{
+			Type:       "object",
+			Properties: struct{}{},
+		},
 	}
 
 	mcp.AddTool(s, listTablesTool, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
@@ -28,6 +35,20 @@ func registerTools(s *mcp.Server, e *Executor) {
 	describeTableTool := &mcp.Tool{
 		Name:        "describe_table",
 		Description: "Get schema information for a specific osquery table",
+		InputSchema: struct {
+			Type       string   `json:"type"`
+			Properties any      `json:"properties"`
+			Required   []string `json:"required"`
+		}{
+			Type: "object",
+			Properties: map[string]any{
+				"table_name": map[string]any{
+					"type":        "string",
+					"description": "osquery table name (e.g. 'processes')",
+				},
+			},
+			Required: []string{"table_name"},
+		},
 	}
 
 	type describeArgs struct {
@@ -51,6 +72,20 @@ func registerTools(s *mcp.Server, e *Executor) {
 	runQueryTool := &mcp.Tool{
 		Name:        "run_query",
 		Description: "Execute a SQL SELECT query against osquery tables",
+		InputSchema: struct {
+			Type       string   `json:"type"`
+			Properties any      `json:"properties"`
+			Required   []string `json:"required"`
+		}{
+			Type: "object",
+			Properties: map[string]any{
+				"sql": map[string]any{
+					"type":        "string",
+					"description": "SQL SELECT query",
+				},
+			},
+			Required: []string{"sql"},
+		},
 	}
 
 	type runArgs struct {

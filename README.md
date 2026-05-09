@@ -10,7 +10,7 @@
   - `describe_table`: Get the schema (columns and types) for a specific table.
   - `run_query`: Execute arbitrary SQL `SELECT` queries and receive results in JSON format.
 - **Safety**: Includes table name validation and uses `--config_path=/dev/null` to ensure clean execution across different environments.
-- **Observability**: Structured logging (via `slog`) and a PID lock mechanism to prevent multiple conflicting instances.
+- **Observability**: Structured logging (via `slog`) to `osqueryi-mcp.log` by default, and a PID lock mechanism to prevent multiple conflicting instances.
 
 ## Prerequisites
 
@@ -49,21 +49,18 @@ The server is configured via environment variables:
 | `OSQUERYI_TIMEOUT` | `30s` | Maximum duration for a query to run. |
 | `OSQUERYI_LOCKFILE` | `osqueryi-mcp.lock` | Path to the PID lock file. Set to `off` to disable. |
 | `OSQUERYI_DEBUG` | (unset) | Set to any value to enable debug-level logging. |
-| `OSQUERYI_LOGFILE` | (unset) | Path to a file for logging. If unset, logs to stderr. |
+| `OSQUERYI_LOGFILE` | `osqueryi-mcp.log` | Path to a file for logging. Set to `off` or use an empty string to log to stderr. |
 
 ## Usage with MCP Clients
 
 To use `osqueryi-mcp` with an MCP client (like Claude Desktop), add it to your configuration file:
 
-### Claude Desktop (Linux/macOS)
+### MCP Configuration
 ```json
 {
   "mcpServers": {
     "osqueryi-mcp": {
-      "command": "/path/to/osqueryi-mcp",
-      "env": {
-        "OSQUERYI_PATH": "/usr/local/bin/osqueryi"
-      }
+      "command": "osqueryi-mcp" 
     }
   }
 }
@@ -86,6 +83,13 @@ An end-to-end test script is provided in Python using `uv`:
 
 ```bash
 uv run tools/test_mcp.py
+```
+
+To run with debug logging enabled and view the output:
+
+```bash
+OSQUERYI_DEBUG=1 uv run tools/test_mcp.py
+tail -f osqueryi-mcp.log
 ```
 
 ## License

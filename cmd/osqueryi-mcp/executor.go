@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -26,6 +27,7 @@ func (e *Executor) runSQL(ctx context.Context, sql string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
+	slog.Debug("executing_sql", "sql", sql)
 	cmd := exec.CommandContext(ctx, e.binaryPath, "--json", "--config_path=/dev/null", sql)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -47,6 +49,7 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
+	slog.Debug("listing_tables")
 	cmd := exec.CommandContext(ctx, e.binaryPath, "--config_path=/dev/null")
 	cmd.Stdin = strings.NewReader(".tables\n")
 	var stdout, stderr bytes.Buffer

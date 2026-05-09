@@ -28,6 +28,7 @@ func loadConfig() Config {
 		BinaryPath: "osqueryi",
 		Timeout:    30 * time.Second,
 		LockFile:   "osqueryi-mcp.lock",
+		LogFile:    "osqueryi-mcp.log",
 	}
 
 	if val := os.Getenv("OSQUERYI_PATH"); val != "" {
@@ -44,7 +45,7 @@ func loadConfig() Config {
 	if val := os.Getenv("OSQUERYI_DEBUG"); val != "" {
 		cfg.Debug = true
 	}
-	if val := os.Getenv("OSQUERYI_LOGFILE"); val != "" {
+	if val, ok := os.LookupEnv("OSQUERYI_LOGFILE"); ok {
 		cfg.LogFile = val
 	}
 
@@ -91,7 +92,7 @@ func acquireLock(lockFile string) (func(), error) {
 
 func setupLogging(cfg Config) *slog.Logger {
 	var w io.Writer = os.Stderr
-	if cfg.LogFile != "" {
+	if cfg.LogFile != "" && cfg.LogFile != "off" {
 		f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
 			w = f
