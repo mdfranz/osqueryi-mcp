@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -23,12 +24,18 @@ func registerTools(s *mcp.Server, e *Executor) {
 	}
 
 	mcp.AddTool(s, listTablesTool, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
 		slog.Info("tool_called", "tool", "list_tables")
 		tables, err := e.listTables(ctx)
+		duration := time.Since(start)
+
 		if err != nil {
+			slog.Error("tool_failed", "tool", "list_tables", "error", err.Error(), "duration_ms", duration.Milliseconds())
 			return errorResult(err.Error()), nil, nil
 		}
-		return textResult(strings.Join(tables, "\n")), nil, nil
+		res := strings.Join(tables, "\n")
+		slog.Info("tool_completed", "tool", "list_tables", "duration_ms", duration.Milliseconds(), "bytes_returned", len(res))
+		return textResult(res), nil, nil
 	})
 
 	// describe_table
@@ -56,15 +63,20 @@ func registerTools(s *mcp.Server, e *Executor) {
 	}
 
 	mcp.AddTool(s, describeTableTool, func(ctx context.Context, req *mcp.CallToolRequest, args describeArgs) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
 		if args.TableName == "" {
 			return errorResult("missing or invalid table_name"), nil, nil
 		}
 
 		slog.Info("tool_called", "tool", "describe_table", "table", args.TableName)
 		data, err := e.DescribeTable(ctx, args.TableName)
+		duration := time.Since(start)
+
 		if err != nil {
+			slog.Error("tool_failed", "tool", "describe_table", "table", args.TableName, "error", err.Error(), "duration_ms", duration.Milliseconds())
 			return errorResult(err.Error()), nil, nil
 		}
+		slog.Info("tool_completed", "tool", "describe_table", "table", args.TableName, "duration_ms", duration.Milliseconds(), "bytes_returned", len(data))
 		return textResult(string(data)), nil, nil
 	})
 
@@ -93,15 +105,20 @@ func registerTools(s *mcp.Server, e *Executor) {
 	}
 
 	mcp.AddTool(s, runQueryTool, func(ctx context.Context, req *mcp.CallToolRequest, args runArgs) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
 		if args.SQL == "" {
 			return errorResult("missing or invalid sql"), nil, nil
 		}
 
 		slog.Info("tool_called", "tool", "run_query", "sql", args.SQL)
 		data, err := e.RunQuery(ctx, args.SQL)
+		duration := time.Since(start)
+
 		if err != nil {
+			slog.Error("tool_failed", "tool", "run_query", "sql", args.SQL, "error", err.Error(), "duration_ms", duration.Milliseconds())
 			return errorResult(err.Error()), nil, nil
 		}
+		slog.Info("tool_completed", "tool", "run_query", "duration_ms", duration.Milliseconds(), "bytes_returned", len(data))
 		return textResult(string(data)), nil, nil
 	})
 }

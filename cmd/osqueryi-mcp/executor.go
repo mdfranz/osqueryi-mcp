@@ -33,15 +33,21 @@ func (e *Executor) runSQL(ctx context.Context, sql string) ([]byte, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	start := time.Now()
 	err := cmd.Run()
+	duration := time.Since(start)
+
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
+			slog.Debug("exec_failed", "sql", sql, "error", err, "duration_ms", duration.Milliseconds())
 			return nil, err
 		}
+		slog.Debug("exec_failed", "sql", sql, "error", errMsg, "duration_ms", duration.Milliseconds())
 		return nil, fmt.Errorf("%s", errMsg)
 	}
 
+	slog.Debug("exec_completed", "sql", sql, "duration_ms", duration.Milliseconds(), "bytes", stdout.Len())
 	return stdout.Bytes(), nil
 }
 
@@ -56,14 +62,21 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	start := time.Now()
 	err := cmd.Run()
+	duration := time.Since(start)
+
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
+			slog.Debug("exec_failed", "op", "list_tables", "error", err, "duration_ms", duration.Milliseconds())
 			return nil, err
 		}
+		slog.Debug("exec_failed", "op", "list_tables", "error", errMsg, "duration_ms", duration.Milliseconds())
 		return nil, fmt.Errorf("%s", errMsg)
 	}
+
+	slog.Debug("exec_completed", "op", "list_tables", "duration_ms", duration.Milliseconds())
 
 	// osqueryi .tables output looks like:
 	//   => table_name
