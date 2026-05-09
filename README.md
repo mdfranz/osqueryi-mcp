@@ -9,6 +9,11 @@
   - `list_tables`: List all available osquery tables on the current system.
   - `describe_table`: Get the schema (columns and types) for a specific table.
   - `run_query`: Execute arbitrary SQL `SELECT` queries and receive results in JSON format.
+- **Workflow Helpers**: Additional tools reduce common multi-step loops:
+  - `search_tables`: Find relevant tables by table or column name.
+  - `preview_table`: Return schema plus sample rows in one call.
+  - `query_table`: Build validated single-table queries from structured arguments.
+  - `refresh_cache`: Clear and reload the cached list of tables and their schemas.
 - **Safety**: Includes table name validation and uses `--config_path=/dev/null` to ensure clean execution across different environments.
 - **Observability**: Structured logging (via `slog`) to `osqueryi-mcp.log` by default, and a PID lock mechanism to prevent multiple conflicting instances.
 
@@ -85,6 +90,7 @@ An end-to-end test script is provided in Python using `uv`.
 ```bash
 uv run tools/test_mcp.py
 ```
+This smoke test exercises both the original tools and the structured helpers (`search_tables`, `preview_table`, and `query_table`).
 
 ### Framework-Specific Examples
 These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using popular Python frameworks:

@@ -121,6 +121,208 @@ func registerTools(s *mcp.Server, e *Executor) {
 		slog.Info("tool_completed", "tool", "run_query", "duration_ms", duration.Milliseconds(), "bytes_returned", len(data))
 		return textResult(string(data)), nil, nil
 	})
+
+	// search_tables
+	searchTablesTool := &mcp.Tool{
+		Name:        "search_tables",
+		Description: "Find osquery tables by table name or column name substring",
+		InputSchema: struct {
+			Type       string   `json:"type"`
+			Properties any      `json:"properties"`
+			Required   []string `json:"required"`
+		}{
+			Type: "object",
+			Properties: map[string]any{
+				"query": map[string]any{
+					"type":        "string",
+					"description": "Substring to match against table names and optionally column names",
+				},
+				"search_columns": map[string]any{
+					"type":        "boolean",
+					"description": "Whether to search within column names too",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Maximum number of matching tables to return",
+				},
+			},
+			Required: []string{"query"},
+		},
+	}
+
+	type searchTablesArgs struct {
+		Query         string `json:"query" jsonschema:"substring to match against table names and column names"`
+		SearchColumns *bool  `json:"search_columns,omitempty" jsonschema:"whether to search within column names"`
+		Limit         int    `json:"limit,omitempty" jsonschema:"maximum number of matches to return"`
+	}
+
+	mcp.AddTool(s, searchTablesTool, func(ctx context.Context, req *mcp.CallToolRequest, args searchTablesArgs) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
+		if strings.TrimSpace(args.Query) == "" {
+			return errorResult("missing or invalid query"), nil, nil
+		}
+
+		searchColumns := false
+		if args.SearchColumns != nil {
+			searchColumns = *args.SearchColumns
+		}
+
+		slog.Info("tool_called", "tool", "search_tables", "query", args.Query, "search_columns", searchColumns, "limit", args.Limit)
+		data, err := e.SearchTables(ctx, args.Query, searchColumns, args.Limit)
+		duration := time.Since(start)
+
+		if err != nil {
+			slog.Error("tool_failed", "tool", "search_tables", "query", args.Query, "error", err.Error(), "duration_ms", duration.Milliseconds())
+			return errorResult(err.Error()), nil, nil
+		}
+
+		slog.Info("tool_completed", "tool", "search_tables", "duration_ms", duration.Milliseconds(), "bytes_returned", len(data))
+		return textResult(string(data)), nil, nil
+	})
+
+	// preview_table
+	previewTableTool := &mcp.Tool{
+		Name:        "preview_table",
+		Description: "Return a table schema plus a small sample of rows in one call",
+		InputSchema: struct {
+			Type       string   `json:"type"`
+			Properties any      `json:"properties"`
+			Required   []string `json:"required"`
+		}{
+			Type: "object",
+			Properties: map[string]any{
+				"table_name": map[string]any{
+					"type":        "string",
+					"description": "osquery table name (e.g. 'processes')",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Number of sample rows to return",
+				},
+			},
+			Required: []string{"table_name"},
+		},
+	}
+
+	type previewArgs struct {
+		TableName string `json:"table_name" jsonschema:"osquery table name (e.g. 'processes')"`
+		Limit     int    `json:"limit,omitempty" jsonschema:"number of sample rows to return"`
+	}
+
+	mcp.AddTool(s, previewTableTool, func(ctx context.Context, req *mcp.CallToolRequest, args previewArgs) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
+		if args.TableName == "" {
+			return errorResult("missing or invalid table_name"), nil, nil
+		}
+
+		slog.Info("tool_called", "tool", "preview_table", "table", args.TableName, "limit", args.Limit)
+		data, err := e.PreviewTable(ctx, args.TableName, args.Limit)
+		duration := time.Since(start)
+
+		if err != nil {
+			slog.Error("tool_failed", "tool", "preview_table", "table", args.TableName, "error", err.Error(), "duration_ms", duration.Milliseconds())
+			return errorResult(err.Error()), nil, nil
+		}
+
+		slog.Info("tool_completed", "tool", "preview_table", "table", args.TableName, "duration_ms", duration.Milliseconds(), "bytes_returned", len(data))
+		return textResult(string(data)), nil, nil
+	})
+
+	// query_table
+	queryTableTool := &mcp.Tool{
+		Name:        "query_table",
+		Description: "Build and execute a validated SELECT query for a single osquery table",
+		InputSchema: struct {
+			Type       string   `json:"type"`
+			Properties any      `json:"properties"`
+			Required   []string `json:"required"`
+		}{
+			Type: "object",
+			Properties: map[string]any{
+				"table_name": map[string]any{
+					"type":        "string",
+					"description": "osquery table name (e.g. 'processes')",
+				},
+				"columns": map[string]any{
+					"type":        "array",
+					"description": "Optional list of columns to select; defaults to all columns",
+					"items": map[string]any{
+						"type": "string",
+					},
+				},
+				"where": map[string]any{
+					"type":        "string",
+					"description": "Optional SQL WHERE clause without the WHERE keyword",
+				},
+				"order_by": map[string]any{
+					"type":        "array",
+					"description": "Optional ORDER BY clauses such as 'pid DESC' or 'name'",
+					"items": map[string]any{
+						"type": "string",
+					},
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Maximum number of rows to return",
+				},
+			},
+			Required: []string{"table_name"},
+		},
+	}
+
+	type queryTableArgs struct {
+		TableName string   `json:"table_name" jsonschema:"osquery table name (e.g. 'processes')"`
+		Columns   []string `json:"columns,omitempty" jsonschema:"columns to select"`
+		Where     string   `json:"where,omitempty" jsonschema:"SQL WHERE clause without the WHERE keyword"`
+		OrderBy   []string `json:"order_by,omitempty" jsonschema:"ORDER BY clauses such as 'pid DESC'"`
+		Limit     int      `json:"limit,omitempty" jsonschema:"maximum number of rows to return"`
+	}
+
+	mcp.AddTool(s, queryTableTool, func(ctx context.Context, req *mcp.CallToolRequest, args queryTableArgs) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
+		if args.TableName == "" {
+			return errorResult("missing or invalid table_name"), nil, nil
+		}
+
+		slog.Info("tool_called", "tool", "query_table", "table", args.TableName, "columns", args.Columns, "where", args.Where, "order_by", args.OrderBy, "limit", args.Limit)
+		data, err := e.QueryTable(ctx, args.TableName, args.Columns, args.Where, args.OrderBy, args.Limit)
+		duration := time.Since(start)
+
+		if err != nil {
+			slog.Error("tool_failed", "tool", "query_table", "table", args.TableName, "error", err.Error(), "duration_ms", duration.Milliseconds())
+			return errorResult(err.Error()), nil, nil
+		}
+
+		slog.Info("tool_completed", "tool", "query_table", "table", args.TableName, "duration_ms", duration.Milliseconds(), "bytes_returned", len(data))
+		return textResult(string(data)), nil, nil
+	})
+
+	// refresh_cache
+	refreshCacheTool := &mcp.Tool{
+		Name:        "refresh_cache",
+		Description: "Clear and reload the cached list of tables and their schemas",
+		InputSchema: struct {
+			Type       string `json:"type"`
+			Properties any    `json:"properties"`
+		}{
+			Type:       "object",
+			Properties: struct{}{},
+		},
+	}
+
+	mcp.AddTool(s, refreshCacheTool, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
+		slog.Info("tool_called", "tool", "refresh_cache")
+		err := e.RefreshCache(ctx)
+		duration := time.Since(start)
+
+		if err != nil {
+			slog.Error("tool_failed", "tool", "refresh_cache", "error", err.Error(), "duration_ms", duration.Milliseconds())
+			return errorResult(err.Error()), nil, nil
+		}
+		slog.Info("tool_completed", "tool", "refresh_cache", "duration_ms", duration.Milliseconds())
+		return textResult("Cache refreshed successfully"), nil, nil
+	})
 }
 
 func textResult(text string) *mcp.CallToolResult {
