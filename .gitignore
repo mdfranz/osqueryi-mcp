@@ -27,6 +27,10 @@ go.work.sum
 # env file
 .env
 
+# Binaries and runtime artifacts
+osqueryi-mcp
+*.lock
+
 # Editor/IDE
 # .idea/
 # .vscode/
