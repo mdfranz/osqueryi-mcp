@@ -27,7 +27,16 @@ Model Context Protocol (MCP) is Anthropic's new standard for connecting LLMs to 
 
 ---
 
-### Commit 81268e8 - Initial MCP server implementation  
+### Commit 81268e8 - Architecture documentation
+**What:** Documented the vision
+- Wrote design docs explaining MCP architecture
+- Outlined future tool expansion
+
+**Why:** Helped clarify next steps
+
+---
+
+### Commit 3e8838a - Initial MCP server implementation  
 **What:** The MVP
 - Implemented core MCP server in Go
 - Three basic tools:
@@ -50,15 +59,6 @@ Model Context Protocol (MCP) is Anthropic's new standard for connecting LLMs to 
   - Call `list_tables` (verbose, 100+ results)
   - Know table names in advance
   - Write raw SQL (agents not great at this)
-
----
-
-### Commit 3e8838a - Architecture documentation
-**What:** Documented the vision
-- Wrote design docs explaining MCP architecture
-- Outlined future tool expansion
-
-**Why:** Helped clarify next steps
 
 ---
 
@@ -116,8 +116,8 @@ Added 4 new tools:
 - `refresh_cache` - Reload cache manually
 
 Also added:
-- **Disk persistence caching** - Tables/schemas saved to JSON
-- **Background warming** - Load all schemas on startup
+- **Schema caching in the executor** - Reuse discovered table metadata
+- **Refresh support** - Clear and rebuild cached schema state on demand
 
 **Why This Happened:**
 Testing revealed agents were:
@@ -135,16 +135,13 @@ If we provide structured helpers that reduce multi-step loops to single calls, a
 ```
 Problem: Describing 100+ tables on every startup = slow
 Solution: 
-- Cache table list + schemas to disk (osqueryi-mcp-cache.json)
-- Load from disk on startup (instant)
-- Background warmup fetches any missing schemas
-- Auto-update when new schema encountered
+- Cache discovered tables and schemas inside the running process
+- Reuse cached schemas across helper tool calls
+- Refresh manually when needed
 ```
 
 **Key Design Decision:**
-Made caching optional (`OSQUERYI_CACHEFILE=off` to disable) because:
-- Some environments might want fresh data every time
-- Helps debug "is it the cache?" issues
+Keep helper workflows fast without forcing agents to rediscover the same schemas on every step.
 
 ---
 
@@ -160,22 +157,25 @@ Work was stable, tested, ready for users
 ---
 
 ### Commit 0e260f8 - Tool performance optimization
-**What:** First optimization pass
-- Reviewed tool descriptions for verbosity
-- Started thinking about agent efficiency
+**What:** Optimization and persistence pass
+- Added persistent on-disk schema caching (`osqueryi-mcp-cache.json`)
+- Added optional cache control (`OSQUERYI_CACHEFILE=off`)
+- Warmed schemas in the background on startup
+- Trimmed tool descriptions for token efficiency
+- Enhanced the Strands benchmark harness with token tracking
 
 **Why:**
 Early agents using the tool were running longer than expected
 
 ---
 
-## Phase 4: Real-World Testing (Late April - Early May 2026)
+## Phase 4: Real-World Testing (May 9, 2026)
 
 ### The Moment of Truth
 **Date:** May 9, 2026, 23:29
 
 **Setup:**
-Created `tools/strands_test_mcp.py` - A test harness that:
+Expanded `tools/strands_test_mcp.py` from the earlier framework example into a benchmark harness that:
 - Connects LLM agent (OpenAI gpt-5-mini) to osqueryi-mcp via Strands framework
 - Runs 3 realistic tasks:
   1. Structured discovery - Find account-related tables
@@ -507,7 +507,7 @@ Performance:
 
 This wasn't about making a perfect tool or finding the optimal configuration. It was about discovering that:
 
-1. **The tool design was already good** - The 7-tool hierarchy from months ago held up
+1. **The tool design was already good** - The 7-tool hierarchy introduced earlier on May 9 held up
 2. **System prompts matter more than models** - Generic prompts waste both OpenAI and Gemini
 3. **Metrics lie** - Token counts don't tell you if the output is blank
 4. **Small optimizations compound** - Trimmed descriptions + explicit prompt + model choice = 51% savings
@@ -518,9 +518,6 @@ The optimization journey revealed that the real lever isn't better tools or bett
 ---
 
 ## Timeline Summary
-
-- **Early 2026:** Problem identified, MCP server idea conceived
-- **Feb-Apr 2026:** MVP built (3 tools), then expanded (7 tools), cache added, observability added
 - **May 9, 23:29:** Baseline established (OpenAI, 70k tokens)
 - **May 9, 23:39:** Verbose descriptions experiment (failed, +16%)
 - **May 9, 23:42-46:** Trimmed descriptions (worked, -7%)
@@ -529,7 +526,7 @@ The optimization journey revealed that the real lever isn't better tools or bett
 - **May 10, 00:07-09:** OpenAI comparison reveals variance and verbosity tradeoff
 - **May 10:** Optimization complete (51% improvement achieved)
 
-**Total optimization effort:** ~18 hours of testing and analysis, yielding 51% token reduction with Gemini 3.1 Flash.
+**Total elapsed repository history covered here:** about 13 hours from initial commit to write-up, with the late-night optimization sprint concentrated into well under an hour.
 
 ---
 
