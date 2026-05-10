@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -176,14 +177,14 @@ def log_agent_events(event, stats: RunStats):
         logger.info(f"  Output: {res_str}")
 
 
-def run_strands_mcp():
+def run_strands_mcp(requested_model: str):
     server_path = shutil.which("osqueryi-mcp")
     os.environ.setdefault("OSQUERYI_LOCKFILE", "off")
     os.environ.setdefault("OSQUERYI_LOGFILE", "off")
 
     # Normalize API keys to avoid warnings
     if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
-        os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+        os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
     elif os.getenv("GOOGLE_API_KEY") and os.getenv("GEMINI_API_KEY"):
         # If both are set, unset GEMINI_API_KEY to avoid the warning from google-genai
         del os.environ["GEMINI_API_KEY"]
@@ -192,18 +193,22 @@ def run_strands_mcp():
         logger.error("Error: osqueryi-mcp not found in PATH.")
         return
 
-    # Choose model based on environment variables
+    # Intelligent model provider detection
     model = None
-    if os.getenv("OPENAI_API_KEY"):
-        model = OpenAIModel(model_id="gpt-5-mini")
-        logger.info("Using OpenAI model (gpt-5-mini)")
-    elif os.getenv("GOOGLE_API_KEY"):
-        model = GeminiModel(model_id="gemini-3.1-flash-image-preview")
-        logger.info("Using Gemini model (gemini-3.1-flash-image-preview)")
+    if requested_model.startswith(("gpt-", "o1-")):
+        if not os.getenv("OPENAI_API_KEY"):
+            logger.error("Error: OPENAI_API_KEY not found in environment.")
+            return
+        model = OpenAIModel(model_id=requested_model)
+        logger.info(f"Using OpenAI model ({requested_model})")
+    elif requested_model.startswith("gemini-"):
+        if not os.getenv("GOOGLE_API_KEY"):
+            logger.error("Error: GOOGLE_API_KEY not found in environment.")
+            return
+        model = GeminiModel(model_id=requested_model)
+        logger.info(f"Using Gemini model ({requested_model})")
     else:
-        logger.error(
-            "Error: Neither OPENAI_API_KEY nor GOOGLE_API_KEY/GEMINI_API_KEY found in environment."
-        )
+        logger.error(f"Error: Unknown model provider for {requested_model}")
         return
 
     tasks = [
@@ -290,4 +295,6 @@ def run_strands_mcp():
 
 
 if __name__ == "__main__":
-    run_strands_mcp()
+    default_model = "gemini-3.1-flash-lite"
+    model_id = sys.argv[1] if len(sys.argv) > 1 else default_model
+    run_strands_mcp(model_id)

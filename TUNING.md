@@ -257,6 +257,84 @@ Initial testing of Gemini showed blank responses despite correct tool execution.
 - OpenAI at average (94k): 102% more tokens, with high variance
 - Gemini: Consistent, sufficient detail, 3.7x faster on average
 
+## Latest Cross-Framework Benchmark (2026-05-10)
+
+These are the latest **comparable successful runs** from the local logs after adding the PydanticAI harness:
+
+- `strands_test.log`
+  - `gemini-3.1-flash-lite` at 08:14:41
+  - `gpt-5-mini` at 08:15:14
+- `pydantic_ai_test.log`
+  - `google-gla:gemini-3.1-flash-lite` at 08:10:53
+  - `openai:gpt-5-mini` at 08:11:29
+
+Excluded from comparison:
+- Earlier failed PydanticAI runs with missing API keys
+- Earlier PydanticAI run that crashed on `AgentRunResult.data`
+- Earlier Strands run using `gemini-3.1-flash-image-preview` (not comparable to `flash-lite`)
+
+### Overall Results
+
+| Framework | Model | Runtime | Calls | Input | Output | Total | Notes |
+|-----------|-------|---------|-------|-------|--------|-------|-------|
+| **PydanticAI** | **Gemini 3.1 Flash Lite** | **15.3s** | 9 | 18,244 | 1,747 | **19,991** | Best overall |
+| Strands | Gemini 3.1 Flash Lite | 18.2s | 9 | 27,600 | 1,558 | 29,158 | Slightly slower, more input-heavy |
+| Strands | GPT-5 Mini | **72.0s** | 11 | 66,267 | 7,180 | 73,447 | Faster than PydanticAI on OpenAI |
+| PydanticAI | GPT-5 Mini | 81.4s | 11 | 33,328 | 8,244 | 41,572 | Lower token use than Strands on OpenAI |
+
+### Task-Level Breakdown
+
+| Framework | Model | Structured Discovery | Single-Table Query | Join-Heavy Workload |
+|-----------|-------|----------------------|--------------------|---------------------|
+| PydanticAI | Gemini 3.1 Flash Lite | 4.9s / 3,840 total | 5.2s / 8,463 total | 5.1s / 7,688 total |
+| Strands | Gemini 3.1 Flash Lite | 5.6s / 3,637 total | 6.1s / 9,583 total | 6.5s / 15,938 total |
+| Strands | GPT-5 Mini | 30.5s / 9,981 total | 24.3s / 22,963 total | **17.2s / 40,503 total** |
+| PydanticAI | GPT-5 Mini | 30.6s / 7,594 total | **18.4s / 7,210 total** | 32.4s / 26,768 total |
+
+### Key Findings
+
+#### 1. Gemini is the current winner across both frameworks
+
+- Gemini beat GPT-5 Mini on both latency and total tokens in both harnesses
+- Best run overall was **PydanticAI + Gemini 3.1 Flash Lite**
+- Relative to Strands + GPT-5 Mini, PydanticAI + Gemini cut total tokens by **73%** (73,447 -> 19,991) and runtime by **79%** (72.0s -> 15.3s)
+
+#### 2. PydanticAI is the better Gemini harness right now
+
+- Same number of calls as Strands on Gemini (9 vs 9)
+- Lower total tokens: **19,991 vs 29,158** (-31%)
+- Lower runtime: **15.3s vs 18.2s** (-16%)
+- Biggest difference showed up in the join-heavy task, where Strands consumed far more context
+
+#### 3. Strands is faster on OpenAI, but much less token-efficient
+
+- Strands + GPT-5 Mini finished in **72.0s** vs **81.4s** for PydanticAI
+- But Strands consumed **73,447 total tokens** vs **41,572** for PydanticAI (+77%)
+- Strands also logged **50,176 cache-read tokens**, which helped speed but indicates substantial context reuse overhead
+
+#### 4. Framework choice depends on whether you optimize for speed or cost
+
+- **Best speed/cost combination:** PydanticAI + Gemini
+- **Best OpenAI runtime:** Strands + GPT-5 Mini
+- **Best OpenAI token efficiency:** PydanticAI + GPT-5 Mini
+
+### Updated Recommendation
+
+For the current codebase and prompts:
+
+1. Use **Gemini 3.1 Flash Lite** as the primary model.
+2. Use **PydanticAI** if token efficiency and overall wall-clock performance are the main goals.
+3. Use **Strands** only if you specifically want the faster OpenAI-path behavior and are willing to pay a substantial token premium.
+
+### Source Runs
+
+- `strands_test.log`
+  - Gemini totals: 9 calls, 27,600 input, 1,558 output, 29,158 total, 18.2s
+  - OpenAI totals: 11 calls, 66,267 input, 7,180 output, 73,447 total, 72.0s
+- `pydantic_ai_test.log`
+  - Gemini totals: 9 requests, 18,244 input, 1,747 output, 19,991 total, 15.3s
+  - OpenAI totals: 11 requests, 33,328 input, 8,244 output, 41,572 total, 81.4s
+
 ## Final Recommendation
 
 **For production MCP tool usage with osquery, use Gemini 3.1 Flash** with the explicit explanation system prompt:

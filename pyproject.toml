@@ -8,5 +8,6 @@ dependencies = [
     "agno>=2.6.5",
     "google-genai>=2.0.1",
     "openai>=2.36.0",
+    "pydantic-ai[mcp]>=1.93.0",
     "strands-agents>=1.39.0",
 ]
