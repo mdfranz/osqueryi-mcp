@@ -121,7 +121,15 @@ tail -f osqueryi-mcp.log
 
 ## Documentation & Guides
 
-- [Python MCP Client Development Guide](PYTHON_MCP_CLIENT.md): Technical reference for building Python clients with Agno, Strands, Microsoft Agent Framework, and Pydantic AI.
+### Project & Optimization
+- [Development Journey](PROJECT.md): The narrative of how `osqueryi-mcp` evolved from MVP to a tuned production-ready server.
+- [Optimization Results](TUNING.md): Detailed benchmarks and key findings on token efficiency, model comparisons (Gemini vs OpenAI), and system prompting.
+
+### Technical References
+- [Python MCP Client Guide](refs/PYTHON_MCP_CLIENT.md): Technical reference for building Python clients with Agno, Strands, and Pydantic AI.
+- [SQL MCP Architecture Patterns](refs/SQL-MCP.md): Deep dive into advanced patterns for schema discovery and progressive disclosure.
+- [Go MCP Server Guide](refs/MCP-SQL-GUIDE.md): Best practices for building Go-based MCP servers for local command execution.
+- [Original Implementation Plan](refs/claude-plan.md): The foundational design document for the server.
 
 ## License
 
