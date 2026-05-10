@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,10 +16,15 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+var CommitHash = "dev"
+
+const Version = "0.1.0"
+
 type Config struct {
 	BinaryPath string
 	Timeout    time.Duration
 	LockFile   string
+	CacheFile  string
 	Debug      bool
 	LogFile    string
 }
@@ -28,6 +34,7 @@ func loadConfig() Config {
 		BinaryPath: "osqueryi",
 		Timeout:    30 * time.Second,
 		LockFile:   "osqueryi-mcp.lock",
+		CacheFile:  "osqueryi-mcp-cache.json",
 		LogFile:    "osqueryi-mcp.log",
 	}
 
@@ -41,6 +48,9 @@ func loadConfig() Config {
 	}
 	if val := os.Getenv("OSQUERYI_LOCKFILE"); val != "" {
 		cfg.LockFile = val
+	}
+	if val := os.Getenv("OSQUERYI_CACHEFILE"); val != "" {
+		cfg.CacheFile = val
 	}
 	if val := os.Getenv("OSQUERYI_DEBUG"); val != "" {
 		cfg.Debug = true
@@ -111,6 +121,15 @@ func setupLogging(cfg Config) *slog.Logger {
 }
 
 func main() {
+	showVersion := flag.Bool("v", false, "show version")
+	flag.BoolVar(showVersion, "version", false, "show version")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("osqueryi-mcp %s (%s)\n", Version, CommitHash)
+		return
+	}
+
 	cfg := loadConfig()
 	logger := setupLogging(cfg)
 
@@ -130,12 +149,15 @@ func main() {
 	}
 	defer release()
 
-	executor := NewExecutor(cfg.BinaryPath, cfg.Timeout)
+	executor := NewExecutor(cfg.BinaryPath, cfg.Timeout, cfg.CacheFile)
+
+	cwd, _ := os.Getwd()
+	logger.Info("server_environment", "cwd", cwd, "cache_file", cfg.CacheFile, "commit", CommitHash)
 
 	s := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "osqueryi-mcp",
-			Version: "0.1.0",
+			Version: Version + "-" + CommitHash,
 		},
 		nil,
 	)
@@ -145,7 +167,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("starting osqueryi-mcp server", "bin", cfg.BinaryPath)
+	// Warm cache in background
+	go func() {
+		warmCtx, cancel := context.WithTimeout(context.Background(), cfg.Timeout*2)
+		defer cancel()
+
+		// If we already have all schemas (e.g. from disk cache), this will be a no-op
+		if err := executor.ensureAllSchemas(warmCtx); err != nil {
+			logger.Warn("failed to warm cache", "error", err)
+		} else {
+			logger.Info("cache warmed")
+		}
+	}()
+
+	logger.Info("starting osqueryi-mcp server", "bin", cfg.BinaryPath, "commit", CommitHash)
 	if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		logger.Error("server error", "error", err)
 		os.Exit(1)

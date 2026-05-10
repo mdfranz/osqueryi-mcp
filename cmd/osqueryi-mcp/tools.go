@@ -13,7 +13,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// list_tables
 	listTablesTool := &mcp.Tool{
 		Name:        "list_tables",
-		Description: "List all available osquery tables",
+		Description: "Lists all table names. Cheaper than search_tables.",
 		InputSchema: struct {
 			Type       string `json:"type"`
 			Properties any    `json:"properties"`
@@ -41,7 +41,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// describe_table
 	describeTableTool := &mcp.Tool{
 		Name:        "describe_table",
-		Description: "Get schema information for a specific osquery table",
+		Description: "Gets table schema only. Use preview_table for schema + sample rows.",
 		InputSchema: struct {
 			Type       string   `json:"type"`
 			Properties any      `json:"properties"`
@@ -83,7 +83,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// run_query
 	runQueryTool := &mcp.Tool{
 		Name:        "run_query",
-		Description: "Execute a SQL SELECT query against osquery tables",
+		Description: "Executes any SQL including JOINs. Use query_table for single-table queries.",
 		InputSchema: struct {
 			Type       string   `json:"type"`
 			Properties any      `json:"properties"`
@@ -125,7 +125,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// search_tables
 	searchTablesTool := &mcp.Tool{
 		Name:        "search_tables",
-		Description: "Find osquery tables by table name or column name substring",
+		Description: "Finds tables by keyword. Search once broadly; search_columns=true is expensive.",
 		InputSchema: struct {
 			Type       string   `json:"type"`
 			Properties any      `json:"properties"`
@@ -139,11 +139,11 @@ func registerTools(s *mcp.Server, e *Executor) {
 				},
 				"search_columns": map[string]any{
 					"type":        "boolean",
-					"description": "Whether to search within column names too",
+					"description": "Search column names too. Expensive — default false.",
 				},
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "Maximum number of matching tables to return",
+					"description": "Max results. Use higher value (10+) to reduce re-searches.",
 				},
 			},
 			Required: []string{"query"},
@@ -183,7 +183,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// preview_table
 	previewTableTool := &mcp.Tool{
 		Name:        "preview_table",
-		Description: "Return a table schema plus a small sample of rows in one call",
+		Description: "Returns schema and sample rows. Better than describe_table for exploration.",
 		InputSchema: struct {
 			Type       string   `json:"type"`
 			Properties any      `json:"properties"`
@@ -197,7 +197,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 				},
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "Number of sample rows to return",
+					"description": "Sample rows to return. Keep low if previewing multiple tables.",
 				},
 			},
 			Required: []string{"table_name"},
@@ -231,7 +231,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// query_table
 	queryTableTool := &mcp.Tool{
 		Name:        "query_table",
-		Description: "Build and execute a validated SELECT query for a single osquery table",
+		Description: "Queries one table with validation. Use for single-table work.",
 		InputSchema: struct {
 			Type       string   `json:"type"`
 			Properties any      `json:"properties"`
@@ -300,7 +300,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// refresh_cache
 	refreshCacheTool := &mcp.Tool{
 		Name:        "refresh_cache",
-		Description: "Clear and reload the cached list of tables and their schemas",
+		Description: "Reloads all table schemas. Slow — call only if schema changed.",
 		InputSchema: struct {
 			Type       string `json:"type"`
 			Properties any    `json:"properties"`

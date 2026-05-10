@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -15,19 +16,92 @@ import (
 )
 
 type Executor struct {
-	binaryPath string
-	timeout    time.Duration
-	mu         sync.RWMutex
-	tables     []string
-	schemas    map[string][]TableColumn
+	binaryPath        string
+	timeout           time.Duration
+	cacheFile         string
+	mu                sync.RWMutex
+	tables            []string
+	schemas           map[string][]TableColumn
+	allSchemasFetched bool
+	warmMu            sync.Mutex
 }
 
-func NewExecutor(binaryPath string, timeout time.Duration) *Executor {
-	return &Executor{
+type PersistedCache struct {
+	Tables            []string                 `json:"tables"`
+	Schemas           map[string][]TableColumn `json:"schemas"`
+	AllSchemasFetched bool                     `json:"all_schemas_fetched"`
+}
+
+func NewExecutor(binaryPath string, timeout time.Duration, cacheFile string) *Executor {
+	e := &Executor{
 		binaryPath: binaryPath,
 		timeout:    timeout,
+		cacheFile:  cacheFile,
 		schemas:    make(map[string][]TableColumn),
 	}
+
+	if cacheFile != "" && cacheFile != "off" {
+		if err := e.loadCache(); err != nil {
+			if os.IsNotExist(err) {
+				slog.Info("cache file not found, will create on exit or after warming", "file", cacheFile)
+			} else {
+				slog.Warn("failed to load cache", "file", cacheFile, "error", err)
+			}
+		} else {
+			slog.Info("loaded cache from disk", "file", cacheFile, "tables", len(e.tables))
+		}
+	}
+
+	return e
+}
+
+func (e *Executor) loadCache() error {
+	data, err := os.ReadFile(e.cacheFile)
+	if err != nil {
+		return err
+	}
+
+	var pc PersistedCache
+	if err := json.Unmarshal(data, &pc); err != nil {
+		return err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.tables = pc.Tables
+	e.schemas = pc.Schemas
+	e.allSchemasFetched = pc.AllSchemasFetched
+	return nil
+}
+
+func (e *Executor) saveCache() error {
+	if e.cacheFile == "" || e.cacheFile == "off" {
+		return nil
+	}
+
+	slog.Info("saving cache to disk", "file", e.cacheFile)
+
+	e.mu.RLock()
+	pc := PersistedCache{
+		Tables:            e.tables,
+		Schemas:           e.schemas,
+		AllSchemasFetched: e.allSchemasFetched,
+	}
+	e.mu.RUnlock()
+
+	data, err := json.MarshalIndent(pc, "", "  ")
+	if err != nil {
+		slog.Error("failed to marshal cache", "error", err)
+		return err
+	}
+
+	err = os.WriteFile(e.cacheFile, data, 0644)
+	if err != nil {
+		slog.Error("failed to write cache file", "file", e.cacheFile, "error", err)
+	} else {
+		slog.Info("saved cache to disk", "file", e.cacheFile, "tables", len(pc.Tables))
+	}
+	return err
 }
 
 type TableColumn struct {
@@ -73,16 +147,6 @@ func (e *Executor) runSQL(ctx context.Context, sql string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-func (e *Executor) RefreshCache(ctx context.Context) error {
-	e.mu.Lock()
-	e.tables = nil
-	e.schemas = make(map[string][]TableColumn)
-	e.mu.Unlock()
-
-	_, err := e.listTables(ctx)
-	return err
-}
-
 func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	e.mu.RLock()
 	if len(e.tables) > 0 {
@@ -92,53 +156,111 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	}
 	e.mu.RUnlock()
 
-	ctx, cancel := context.WithTimeout(ctx, e.timeout)
-	defer cancel()
-
 	slog.Debug("listing_tables")
-	cmd := exec.CommandContext(ctx, e.binaryPath, "--config_path=/dev/null")
-	cmd.Stdin = strings.NewReader(".tables\n")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	start := time.Now()
-	err := cmd.Run()
-	duration := time.Since(start)
-
+	data, err := e.runSQL(ctx, "SELECT name FROM osquery_registry WHERE registry = 'table' ORDER BY name;")
 	if err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			slog.Debug("exec_failed", "op", "list_tables", "error", err, "duration_ms", duration.Milliseconds())
-			return nil, err
-		}
-		slog.Debug("exec_failed", "op", "list_tables", "error", errMsg, "duration_ms", duration.Milliseconds())
-		return nil, fmt.Errorf("%s", errMsg)
+		return nil, err
 	}
 
-	slog.Debug("exec_completed", "op", "list_tables", "duration_ms", duration.Milliseconds())
+	var results []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil, fmt.Errorf("failed to parse table list: %w", err)
+	}
 
-	// osqueryi .tables output looks like:
-	//   => table_name
-	//   => other_table
-	lines := strings.Split(stdout.String(), "\n")
 	var tables []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "=> ") {
-			tables = append(tables, strings.TrimPrefix(line, "=> "))
-		}
+	for _, r := range results {
+		tables = append(tables, r.Name)
 	}
-
-	sort.Strings(tables)
 
 	e.mu.Lock()
 	if len(e.tables) == 0 {
 		e.tables = append([]string(nil), tables...)
+		e.mu.Unlock()
+		_ = e.saveCache()
+	} else {
+		e.mu.Unlock()
 	}
-	e.mu.Unlock()
 
 	return tables, nil
+}
+
+func (e *Executor) fetchAllSchemas(ctx context.Context) error {
+	slog.Debug("fetching_all_schemas")
+	query := "SELECT m.name as table_name, p.* FROM (SELECT name FROM osquery_registry WHERE registry = 'table') m, pragma_table_info(m.name) p;"
+	data, err := e.runSQL(ctx, query)
+	if err != nil {
+		return err
+	}
+
+	type fullSchemaEntry struct {
+		TableColumn
+		TableName string `json:"table_name"`
+	}
+
+	var entries []fullSchemaEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return fmt.Errorf("failed to parse all schemas: %w", err)
+	}
+
+	newSchemas := make(map[string][]TableColumn)
+	for _, entry := range entries {
+		newSchemas[entry.TableName] = append(newSchemas[entry.TableName], entry.TableColumn)
+	}
+
+	e.mu.Lock()
+	for table, cols := range newSchemas {
+		e.schemas[table] = cols
+	}
+	// Also update tables list if empty
+	if len(e.tables) == 0 {
+		tables := make([]string, 0, len(newSchemas))
+		for table := range newSchemas {
+			tables = append(tables, table)
+		}
+		sort.Strings(tables)
+		e.tables = tables
+	}
+	e.allSchemasFetched = true
+	e.mu.Unlock()
+
+	return e.saveCache()
+}
+
+func (e *Executor) ensureAllSchemas(ctx context.Context) error {
+	e.mu.RLock()
+	if e.allSchemasFetched {
+		e.mu.RUnlock()
+		return nil
+	}
+	e.mu.RUnlock()
+
+	e.warmMu.Lock()
+	defer e.warmMu.Unlock()
+
+	// Double check
+	e.mu.RLock()
+	if e.allSchemasFetched {
+		e.mu.RUnlock()
+		return nil
+	}
+	e.mu.RUnlock()
+
+	return e.fetchAllSchemas(ctx)
+}
+
+func (e *Executor) RefreshCache(ctx context.Context) error {
+	e.warmMu.Lock()
+	defer e.warmMu.Unlock()
+
+	e.mu.Lock()
+	e.tables = nil
+	e.schemas = make(map[string][]TableColumn)
+	e.allSchemasFetched = false
+	e.mu.Unlock()
+
+	return e.fetchAllSchemas(ctx)
 }
 
 var tableNameRegex = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -196,8 +318,11 @@ func (e *Executor) describeTableColumns(ctx context.Context, tableName string) (
 	e.mu.Lock()
 	if _, ok := e.schemas[tableName]; !ok {
 		e.schemas[tableName] = append([]TableColumn(nil), columns...)
+		e.mu.Unlock()
+		_ = e.saveCache()
+	} else {
+		e.mu.Unlock()
 	}
-	e.mu.Unlock()
 
 	return append([]TableColumn(nil), columns...), nil
 }
@@ -319,30 +444,62 @@ func (e *Executor) SearchTables(ctx context.Context, query string, searchColumns
 		return nil, err
 	}
 
-	matches := make([]SearchMatch, 0)
-	for _, table := range tables {
-		match := SearchMatch{TableName: table}
-		if strings.Contains(strings.ToLower(table), query) {
-			match.MatchReasons = append(match.MatchReasons, "table_name")
+	if searchColumns {
+		if err := e.ensureAllSchemas(ctx); err != nil {
+			return nil, err
 		}
+	}
 
-		if searchColumns {
-			columns, err := e.describeTableColumns(ctx, table)
-			if err != nil {
-				return nil, err
-			}
-			for _, column := range columns {
-				if strings.Contains(strings.ToLower(column.Name), query) {
-					match.MatchingColumns = append(match.MatchingColumns, column.Name)
+	matches := make([]SearchMatch, 0, len(tables))
+	matchesMu := sync.Mutex{}
+
+	if searchColumns {
+		var wg sync.WaitGroup
+		semaphore := make(chan struct{}, 8)
+		for _, table := range tables {
+			wg.Add(1)
+			go func(tableName string) {
+				defer wg.Done()
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }()
+
+				columns, err := e.describeTableColumns(ctx, tableName)
+				if err != nil {
+					return
 				}
-			}
-			if len(match.MatchingColumns) > 0 {
-				match.MatchReasons = append(match.MatchReasons, "columns")
-			}
-		}
 
-		if len(match.MatchReasons) > 0 {
-			matches = append(matches, match)
+				match := SearchMatch{TableName: tableName}
+				if strings.Contains(strings.ToLower(tableName), query) {
+					match.MatchReasons = append(match.MatchReasons, "table_name")
+				}
+
+				for _, column := range columns {
+					if strings.Contains(strings.ToLower(column.Name), query) {
+						match.MatchingColumns = append(match.MatchingColumns, column.Name)
+					}
+				}
+				if len(match.MatchingColumns) > 0 {
+					match.MatchReasons = append(match.MatchReasons, "columns")
+				}
+
+				if len(match.MatchReasons) > 0 {
+					matchesMu.Lock()
+					matches = append(matches, match)
+					matchesMu.Unlock()
+				}
+			}(table)
+		}
+		wg.Wait()
+	} else {
+		for _, table := range tables {
+			match := SearchMatch{TableName: table}
+			if strings.Contains(strings.ToLower(table), query) {
+				match.MatchReasons = append(match.MatchReasons, "table_name")
+			}
+
+			if len(match.MatchReasons) > 0 {
+				matches = append(matches, match)
+			}
 		}
 	}
 

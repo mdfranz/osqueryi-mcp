@@ -31,6 +31,7 @@ go.work.sum
 /osqueryi-mcp
 *.lock
 *.log
+*.json
 
 # Editor/IDE
 # .idea/

@@ -53,8 +53,19 @@ The server is configured via environment variables:
 | `OSQUERYI_PATH` | `osqueryi` | Path to the `osqueryi` binary. |
 | `OSQUERYI_TIMEOUT` | `30s` | Maximum duration for a query to run. |
 | `OSQUERYI_LOCKFILE` | `osqueryi-mcp.lock` | Path to the PID lock file. Set to `off` to disable. |
+| `OSQUERYI_CACHEFILE` | `osqueryi-mcp-cache.json` | Path to the schema cache file. Set to `off` to disable. |
 | `OSQUERYI_DEBUG` | (unset) | Set to any value to enable debug-level logging. |
 | `OSQUERYI_LOGFILE` | `osqueryi-mcp.log` | Path to a file for logging. Set to `off` or use an empty string to log to stderr. |
+
+## Caching
+
+`osqueryi-mcp` uses a local JSON file to cache osquery table names and their schemas. This significantly improves performance for tools like `search_tables`, `preview_table`, and `query_table` that need to know column definitions before executing.
+
+- **On-Disk Persistence**: The cache is saved to disk so it persists across server restarts.
+- **Background Warming**: Upon startup, the server automatically starts a background process to "warm" the cache by fetching any missing schemas.
+- **Auto-Update**: Whenever a new table is described via `describe_table` or `preview_table`, the cache is updated.
+- **Manual Refresh**: Use the `refresh_cache` tool to force a full reload of all table schemas from `osqueryi`.
+- **Disabling**: Set `OSQUERYI_CACHEFILE=off` to disable persistent caching entirely.
 
 ## Usage with MCP Clients
 
