@@ -107,9 +107,10 @@ This smoke test exercises both the original tools and the structured helpers (`s
 These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using popular Python frameworks:
 
 - **Agno (Phidata)**: `uv run tools/agno_test_mcp.py`
-- **Strands (AWS)**: `uv run tools/strands_test_mcp.py`
+- **Strands (AWS)**: `uv run tools/strands_test_mcp.py [model_id]`
+- **Pydantic AI**: `uv run tools/pydantic_ai_test_mcp.py [model_id]`
 
-*Note: These require `OPENAI_API_KEY` or `GOOGLE_API_KEY` to be set.*
+*Note: These require `OPENAI_API_KEY` or `GOOGLE_API_KEY` to be set. For Strands and Pydantic AI, the default model is `gemini-3.1-flash-lite`.*
 
 To run with debug logging enabled and view the output:
 
