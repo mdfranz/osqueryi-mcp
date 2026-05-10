@@ -279,8 +279,10 @@ Excluded from comparison:
 |-----------|-------|---------|-------|-------|--------|-------|-------|
 | **PydanticAI** | **Gemini 3.1 Flash Lite** | **15.3s** | 9 | 18,244 | 1,747 | **19,991** | Best overall |
 | Strands | Gemini 3.1 Flash Lite | 18.2s | 9 | 27,600 | 1,558 | 29,158 | Slightly slower, more input-heavy |
+| PydanticAI | GPT-5 Nano | 191.0s | 14 | 27,066 | 24,370 | 51,436 | Low input, extremely verbose output |
 | Strands | GPT-5 Mini | **72.0s** | 11 | 66,267 | 7,180 | 73,447 | Faster than PydanticAI on OpenAI |
 | PydanticAI | GPT-5 Mini | 81.4s | 11 | 33,328 | 8,244 | 41,572 | Lower token use than Strands on OpenAI |
+| Strands | GPT-5 Nano | ~240s | 19 | 72,372 | 24,120 | 96,492 | Most calls, very verbose output |
 
 ### Task-Level Breakdown
 

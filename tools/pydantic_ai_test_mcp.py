@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities.hooks import Hooks
 from pydantic_ai.mcp import MCPServerStdio
+from pydantic_ai.models import ModelRequestContext, ModelResponse
 
 # Configure logging to file and console
 LOG_FILE = "pydantic_ai_test.log"
@@ -37,17 +39,27 @@ class TokenUsageTotals:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    cache_read_tokens: int = 0
 
     def add(self, usage: Any) -> None:
         self.requests += getattr(usage, "requests", 0) or 0
         self.input_tokens += getattr(usage, "input_tokens", 0) or 0
         self.output_tokens += getattr(usage, "output_tokens", 0) or 0
-        self.total_tokens += getattr(usage, "total_tokens", 0) or 0
+        
+        # total_tokens might be a method or a field
+        total = getattr(usage, "total_tokens", 0)
+        if callable(total):
+            self.total_tokens += total()
+        else:
+            self.total_tokens += total or 0
+            
+        self.cache_read_tokens += getattr(usage, "cache_read_tokens", 0) or 0
 
     def summary(self) -> str:
         return (
             f"requests={self.requests}, input={self.input_tokens}, "
-            f"output={self.output_tokens}, total={self.total_tokens}"
+            f"output={self.output_tokens}, total={self.total_tokens}, "
+            f"cache_read={self.cache_read_tokens}"
         )
 
 
@@ -91,6 +103,24 @@ async def run_pydantic_ai_mcp(requested_model: str):
     
     logger.info(f"Using model: {model_name}")
 
+    hooks = Hooks()
+
+    @hooks.on.after_model_request
+    async def log_model_usage(
+        ctx: RunContext[None],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        usage = response.usage
+        total = usage.total_tokens() if callable(usage.total_tokens) else usage.total_tokens
+        logger.info(
+            f"[Agent] Model turn finished | Tokens: "
+            f"input={usage.input_tokens}, output={usage.output_tokens}, "
+            f"total={total}, cache_read={usage.cache_read_tokens}"
+        )
+        return response
+
     tasks = [
         (
             "Structured discovery",
@@ -122,11 +152,12 @@ async def run_pydantic_ai_mcp(requested_model: str):
 
     # 1. Setup transport
     # MCPServerStdio acts as an async context manager
-    async with MCPServerStdio(server_path, args=[]) as server:
+    async with MCPServerStdio(server_path, max_retries=3, args=[]) as server:
         # 2. Initialize Agent with the toolset
         agent = Agent(
             model_name,
             toolsets=[server],
+            capabilities=[hooks],
             system_prompt="""
             You are an osquery expert. Use the available MCP tools to query system information.
             Prefer search_tables, preview_table, and query_table for discovery and single-table work.
