@@ -47,13 +47,33 @@ echo ""
 echo "--- Running basic MCP protocol test (test_mcp.py) ---"
 uv run python tools/test_mcp.py
 
-echo ""
-echo "--- Running Agno integration test (agno_test_mcp.py) ---"
-uv run python tools/agno_test_mcp.py
+MODELS_FILE="models.txt"
+if [ -f "$MODELS_FILE" ]; then
+    # Read models into array, ignoring empty lines and comments
+    MODELS=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        MODELS+=("$line")
+    done < "$MODELS_FILE"
+else
+    echo "--- No models.txt found, using default model ---"
+    MODELS=("gemini-2.0-flash")
+fi
 
-echo ""
-echo "--- Running Strands integration test (strands_test_mcp.py) ---"
-uv run python tools/strands_test_mcp.py
+for MODEL in "${MODELS[@]}"; do
+    echo ""
+    echo "================================================================================"
+    echo " MODEL: $MODEL"
+    echo "================================================================================"
+
+    echo ""
+    echo "--- Running Agno integration test (agno_test_mcp.py) ---"
+    uv run python tools/agno_test_mcp.py "$MODEL"
+
+    echo ""
+    echo "--- Running Strands integration test (strands_test_mcp.py) ---"
+    uv run python tools/strands_test_mcp.py "$MODEL"
+done
 
 echo ""
 echo "--- All tests completed successfully! ---"

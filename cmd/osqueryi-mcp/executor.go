@@ -419,6 +419,66 @@ func validateWhereClause(where string) (string, error) {
 	return where, nil
 }
 
+const (
+	MaxPayloadSize = 16384 // 16KB soft limit
+	MaxRows        = 100   // Max rows to return in a single query
+)
+
+type QueryResult struct {
+	Truncated bool   `json:"truncated"`
+	Message   string `json:"message,omitempty"`
+	Results   any    `json:"results"`
+}
+
+func (e *Executor) truncateJSON(data []byte) ([]byte, error) {
+	if len(data) < MaxPayloadSize {
+		var results []map[string]any
+		if err := json.Unmarshal(data, &results); err != nil {
+			return nil, fmt.Errorf("failed to parse results for wrapping: %w", err)
+		}
+
+		truncated := false
+		msg := ""
+		if len(results) > MaxRows {
+			results = results[:MaxRows]
+			truncated = true
+			msg = fmt.Sprintf("Results truncated to %d rows to stay within limits.", MaxRows)
+		}
+
+		res := QueryResult{
+			Truncated: truncated,
+			Message:   msg,
+			Results:   results,
+		}
+		return json.Marshal(res)
+	}
+
+	var results []map[string]any
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil, fmt.Errorf("failed to parse results for truncation: %w", err)
+	}
+
+	originalCount := len(results)
+	if originalCount > MaxRows {
+		results = results[:MaxRows]
+	}
+
+	for len(results) > 1 {
+		newData, err := json.Marshal(results)
+		if err == nil && len(newData) < MaxPayloadSize {
+			break
+		}
+		results = results[:len(results)/2]
+	}
+
+	res := QueryResult{
+		Truncated: true,
+		Message:   fmt.Sprintf("Results truncated from %d to %d rows to stay within size limits.", originalCount, len(results)),
+		Results:   results,
+	}
+	return json.Marshal(res)
+}
+
 func (e *Executor) DescribeTable(ctx context.Context, tableName string) ([]byte, error) {
 	columns, err := e.describeTableColumns(ctx, tableName)
 	if err != nil {
@@ -428,7 +488,11 @@ func (e *Executor) DescribeTable(ctx context.Context, tableName string) ([]byte,
 }
 
 func (e *Executor) RunQuery(ctx context.Context, sql string) ([]byte, error) {
-	return e.runSQL(ctx, sql)
+	data, err := e.runSQL(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	return e.truncateJSON(data)
 }
 
 func (e *Executor) SearchTables(ctx context.Context, query string, searchColumns bool, limit int) ([]byte, error) {
@@ -553,13 +617,31 @@ func (e *Executor) PreviewTable(ctx context.Context, tableName string, limit int
 		TableName string           `json:"table_name"`
 		Columns   []TableColumn    `json:"columns"`
 		Rows      []map[string]any `json:"rows"`
+		Truncated bool             `json:"truncated"`
 	}{
 		TableName: tableName,
 		Columns:   columns,
 		Rows:      previewRows,
 	}
 
-	return json.Marshal(preview)
+	if len(preview.Rows) > MaxRows {
+		preview.Rows = preview.Rows[:MaxRows]
+		preview.Truncated = true
+	}
+
+	data, err := json.Marshal(preview)
+	if err == nil && len(data) > MaxPayloadSize {
+		for len(preview.Rows) > 1 {
+			preview.Rows = preview.Rows[:len(preview.Rows)/2]
+			preview.Truncated = true
+			data, err = json.Marshal(preview)
+			if err == nil && len(data) < MaxPayloadSize {
+				break
+			}
+		}
+	}
+
+	return data, nil
 }
 
 func (e *Executor) QueryTable(ctx context.Context, tableName string, columns []string, where string, orderBy []string, limit int) ([]byte, error) {
@@ -609,5 +691,9 @@ func (e *Executor) QueryTable(ctx context.Context, tableName string, columns []s
 
 	builder.WriteString(fmt.Sprintf(" LIMIT %d;", limit))
 
-	return e.runSQL(ctx, builder.String())
+	data, err := e.runSQL(ctx, builder.String())
+	if err != nil {
+		return nil, err
+	}
+	return e.truncateJSON(data)
 }

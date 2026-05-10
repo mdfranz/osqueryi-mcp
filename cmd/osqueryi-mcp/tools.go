@@ -125,7 +125,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	// search_tables
 	searchTablesTool := &mcp.Tool{
 		Name:        "search_tables",
-		Description: "Finds tables by keyword. Search once broadly; search_columns=true is expensive.",
+		Description: "Finds tables by keyword. Search once broadly; search_columns=true is expensive. Use single-word keywords; literal substring matching is used, so compound multi-word queries (e.g. 'processes users') will fail.",
 		InputSchema: struct {
 			Type       string   `json:"type"`
 			Properties any      `json:"properties"`
@@ -135,7 +135,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 			Properties: map[string]any{
 				"query": map[string]any{
 					"type":        "string",
-					"description": "Substring to match against table names and optionally column names",
+					"description": "Single-word substring to match against table names and optionally column names (e.g. 'process')",
 				},
 				"search_columns": map[string]any{
 					"type":        "boolean",
@@ -151,7 +151,7 @@ func registerTools(s *mcp.Server, e *Executor) {
 	}
 
 	type searchTablesArgs struct {
-		Query         string `json:"query" jsonschema:"substring to match against table names and column names"`
+		Query         string `json:"query" jsonschema:"single-word substring to match against table names and column names"`
 		SearchColumns *bool  `json:"search_columns,omitempty" jsonschema:"whether to search within column names"`
 		Limit         int    `json:"limit,omitempty" jsonschema:"maximum number of matches to return"`
 	}

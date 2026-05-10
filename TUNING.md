@@ -279,9 +279,11 @@ Excluded from comparison:
 |-----------|-------|---------|-------|-------|--------|-------|-------|
 | **PydanticAI** | **Gemini 3.1 Flash Lite** | **15.3s** | 9 | 18,244 | 1,747 | **19,991** | Best overall |
 | Strands | Gemini 3.1 Flash Lite | 18.2s | 9 | 27,600 | 1,558 | 29,158 | Slightly slower, more input-heavy |
-| PydanticAI | GPT-5 Nano | 191.0s | 14 | 27,066 | 24,370 | 51,436 | Low input, extremely verbose output |
-| Strands | GPT-5 Mini | **72.0s** | 11 | 66,267 | 7,180 | 73,447 | Faster than PydanticAI on OpenAI |
+| **PydanticAI** | **Claude Haiku 4.5** | **37.0s** | 11 | 42,943 | 3,342 | **46,285** | Fast and efficient in this framework |
 | PydanticAI | GPT-5 Mini | 81.4s | 11 | 33,328 | 8,244 | 41,572 | Lower token use than Strands on OpenAI |
+| Strands | GPT-5 Mini | **72.0s** | 11 | 66,267 | 7,180 | 73,447 | Faster than PydanticAI on OpenAI |
+| Strands | **Claude Haiku 4.5** | 56.0s | 15 | 122,649 | 4,488 | 127,137 | **Extreme token bloat** in Strands |
+| PydanticAI | GPT-5 Nano | 191.0s | 14 | 27,066 | 24,370 | 51,436 | Low input, extremely verbose output |
 | Strands | GPT-5 Nano | ~240s | 19 | 72,372 | 24,120 | 96,492 | Most calls, very verbose output |
 
 ### Task-Level Breakdown
@@ -290,52 +292,54 @@ Excluded from comparison:
 |-----------|-------|----------------------|--------------------|---------------------|
 | PydanticAI | Gemini 3.1 Flash Lite | 4.9s / 3,840 total | 5.2s / 8,463 total | 5.1s / 7,688 total |
 | Strands | Gemini 3.1 Flash Lite | 5.6s / 3,637 total | 6.1s / 9,583 total | 6.5s / 15,938 total |
+| **PydanticAI** | **Claude Haiku 4.5** | 15.0s / 11,744 total | 9.0s / 8,748 total | 13.0s / 25,793 total |
 | Strands | GPT-5 Mini | 30.5s / 9,981 total | 24.3s / 22,963 total | **17.2s / 40,503 total** |
 | PydanticAI | GPT-5 Mini | 30.6s / 7,594 total | **18.4s / 7,210 total** | 32.4s / 26,768 total |
+| **Strands** | **Claude Haiku 4.5** | 19.0s / 14,792 total | 13.0s / 30,000 total | 24.0s / 82,345 total |
 
 ### Key Findings
 
 #### 1. Gemini is the current winner across both frameworks
 
-- Gemini beat GPT-5 Mini on both latency and total tokens in both harnesses
+- Gemini beat GPT-5 Mini and Claude Haiku on both latency and total tokens in both harnesses
 - Best run overall was **PydanticAI + Gemini 3.1 Flash Lite**
 - Relative to Strands + GPT-5 Mini, PydanticAI + Gemini cut total tokens by **73%** (73,447 -> 19,991) and runtime by **79%** (72.0s -> 15.3s)
 
-#### 2. PydanticAI is the better Gemini harness right now
+#### 2. Claude Haiku is highly sensitive to framework implementation
 
-- Same number of calls as Strands on Gemini (9 vs 9)
-- Lower total tokens: **19,991 vs 29,158** (-31%)
-- Lower runtime: **15.3s vs 18.2s** (-16%)
+- Claude Haiku performed **2.7x better** in PydanticAI than in Strands (46k vs 127k tokens)
+- Strands exhibits exponential context growth with Haiku (Task 3 reached 82k tokens)
+- PydanticAI manages Anthropic's tool-calling state much more efficiently
+
+#### 3. PydanticAI is the better Gemini/Anthropic harness right now
+
+- Lower total tokens and runtime for both Gemini and Claude Haiku
 - Biggest difference showed up in the join-heavy task, where Strands consumed far more context
 
-#### 3. Strands is faster on OpenAI, but much less token-efficient
+#### 4. Strands is slightly faster on OpenAI (GPT-5 Mini), but much less token-efficient
 
 - Strands + GPT-5 Mini finished in **72.0s** vs **81.4s** for PydanticAI
 - But Strands consumed **73,447 total tokens** vs **41,572** for PydanticAI (+77%)
-- Strands also logged **50,176 cache-read tokens**, which helped speed but indicates substantial context reuse overhead
-
-#### 4. Framework choice depends on whether you optimize for speed or cost
-
-- **Best speed/cost combination:** PydanticAI + Gemini
-- **Best OpenAI runtime:** Strands + GPT-5 Mini
-- **Best OpenAI token efficiency:** PydanticAI + GPT-5 Mini
 
 ### Updated Recommendation
 
 For the current codebase and prompts:
 
 1. Use **Gemini 3.1 Flash Lite** as the primary model.
-2. Use **PydanticAI** if token efficiency and overall wall-clock performance are the main goals.
-3. Use **Strands** only if you specifically want the faster OpenAI-path behavior and are willing to pay a substantial token premium.
+2. Use **Claude Haiku 4.5** via **PydanticAI** if you need an Anthropic model; it is remarkably fast (37s) and reasonably efficient (46k tokens).
+3. Use **PydanticAI** as the default framework for both Google and Anthropic models.
+4. Use **Strands** only for OpenAI models where slightly lower latency (72s vs 81s) is worth a 77% token premium.
 
 ### Source Runs
 
 - `strands_test.log`
   - Gemini totals: 9 calls, 27,600 input, 1,558 output, 29,158 total, 18.2s
-  - OpenAI totals: 11 calls, 66,267 input, 7,180 output, 73,447 total, 72.0s
+  - OpenAI (Mini) totals: 11 calls, 66,267 input, 7,180 output, 73,447 total, 72.0s
+  - **Claude Haiku totals: 15 calls, 122,649 input, 4,488 output, 127,137 total, 56.0s**
 - `pydantic_ai_test.log`
   - Gemini totals: 9 requests, 18,244 input, 1,747 output, 19,991 total, 15.3s
-  - OpenAI totals: 11 requests, 33,328 input, 8,244 output, 41,572 total, 81.4s
+  - OpenAI (Mini) totals: 11 requests, 33,328 input, 8,244 output, 41,572 total, 81.4s
+  - **Claude Haiku totals: 11 requests, 42,943 input, 3,342 output, 46,285 total, 37.0s**
 
 ## Final Recommendation
 

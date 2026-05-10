@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import shutil
@@ -16,30 +15,57 @@ from strands.hooks import (
     BeforeModelCallEvent,
     BeforeToolCallEvent,
 )
+from strands.models.anthropic import AnthropicModel
 from strands.models.gemini import GeminiModel
 from strands.models.openai import OpenAIModel
 from strands.tools.mcp import MCPClient
 
-# Configure logging to file and console
-LOG_FILE = "strands_test.log"
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
-)
-# Set console to INFO to keep it clean while logging DEBUG to file
-for h in logging.root.handlers:
-    if type(h) is logging.StreamHandler:
-        h.setLevel(logging.INFO)
-# Enable DEBUG logging for key libraries to capture HTTP and MCP traffic
-logging.getLogger("mcp").setLevel(logging.DEBUG)
-logging.getLogger("httpx").setLevel(logging.DEBUG)
-logging.getLogger("httpcore").setLevel(logging.DEBUG)
-logging.getLogger("openai").setLevel(logging.DEBUG)
-logging.getLogger("google.genai").setLevel(logging.DEBUG)
 
+def setup_logging(log_file: str, debug_libs: tuple[str, ...]) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+    )
+    # Console at INFO; file stays at DEBUG. `type(h) is` (not isinstance) avoids matching FileHandler.
+    for h in logging.root.handlers:
+        if type(h) is logging.StreamHandler:
+            h.setLevel(logging.INFO)
+    for name in debug_libs:
+        logging.getLogger(name).setLevel(logging.DEBUG)
+
+
+setup_logging(
+    "strands_test.log",
+    ("mcp", "httpx", "httpcore", "openai", "google.genai"),
+)
 logger = logging.getLogger("strands_test")
+
+
+# (model_id_prefixes, api_key_env, factory, label)
+PROVIDERS = [
+    (("gpt-", "o1-"), "OPENAI_API_KEY", lambda m: OpenAIModel(model_id=m), "OpenAI"),
+    (("gemini-",), "GOOGLE_API_KEY", lambda m: GeminiModel(model_id=m), "Gemini"),
+    (
+        ("claude-",),
+        "ANTHROPIC_API_KEY",
+        lambda m: AnthropicModel(model_id=m, max_tokens=8192),
+        "Anthropic",
+    ),
+]
+
+
+def build_model(requested: str):
+    for prefixes, env_key, factory, label in PROVIDERS:
+        if requested.startswith(prefixes):
+            if not os.getenv(env_key):
+                logger.error(f"Error: {env_key} not found in environment.")
+                return None
+            logger.info(f"Using {label} model ({requested})")
+            return factory(requested)
+    logger.error(f"Error: Unknown model provider for {requested}")
+    return None
 
 
 @dataclass
@@ -152,29 +178,72 @@ def _format_usage(usage: dict[str, int]) -> str:
     return usage_info
 
 
-def log_agent_events(event, stats: RunStats):
-    """Callback for strands agent hooks to provide visibility into its inner workings."""
-    if isinstance(event, BeforeModelCallEvent):
-        logger.info("\n[Agent] Calling model...")
-    elif isinstance(event, AfterModelCallEvent):
-        usage = _extract_usage_from_event(event)
-        if usage:
-            stats.task_tokens.add(usage)
-            stats.overall_tokens.add(usage)
-            logger.info(f"[Agent] Model call finished | Tokens: {_format_usage(usage)}")
-        else:
-            logger.info("[Agent] Model call finished | Tokens: unavailable")
-    elif isinstance(event, BeforeToolCallEvent):
-        logger.info(f"\n[Tool Call] {event.tool_use['name']}")
-        logger.info(f"  Args: {event.tool_use['input']}")
-    elif isinstance(event, AfterToolCallEvent):
-        status = event.result.get("status", "unknown")
-        logger.info(f"[Tool Result] status={status}")
-        # Truncate large results for cleaner stdout
-        res_str = str(event.result.get("content", ""))
-        if len(res_str) > 500:
-            res_str = res_str[:500] + "... (truncated)"
-        logger.info(f"  Output: {res_str}")
+def log_agent_events(event, stats: RunStats, model_id: str):
+    """Hook callback that logs model calls and tool calls as they happen."""
+    match event:
+        case BeforeModelCallEvent():
+            logger.info(f"\n[Agent] Calling model: {model_id}...")
+        case AfterModelCallEvent():
+            usage = _extract_usage_from_event(event)
+            if usage:
+                stats.task_tokens.add(usage)
+                stats.overall_tokens.add(usage)
+                logger.info(f"[Agent] Model call finished | Model: {model_id} | Tokens: {_format_usage(usage)}")
+            else:
+                logger.info(f"[Agent] Model call finished | Model: {model_id} | Tokens: unavailable")
+        case BeforeToolCallEvent():
+            logger.info(f"\n[Tool Call] {event.tool_use['name']}")
+            logger.info(f"  Args: {event.tool_use['input']}")
+        case AfterToolCallEvent():
+            status = event.result.get("status", "unknown")
+            logger.info(f"[Tool Result] status={status}")
+            res_str = str(event.result.get("content", ""))
+            if len(res_str) > 500:
+                res_str = res_str[:500] + "... (truncated)"
+            logger.info(f"  Output: {res_str}")
+
+
+TASKS = [
+    (
+        "Structured discovery",
+        """
+        Use the osquery MCP tools to find account-related tables efficiently.
+        Prefer search_tables first, then preview_table for the best candidates, and explain whether the helper tools reduce round trips compared with list_tables + describe_table.
+        """,
+    ),
+    (
+        "Single-table query",
+        """
+        Investigate processes using the structured helpers.
+        Preview the processes table, then use query_table to return 5 on-disk processes with pid, name, path, uid, and start_time ordered by pid.
+        End with a short note on why query_table is a better fit than raw SQL here.
+        """,
+    ),
+    (
+        "Join-heavy workload",
+        """
+        Run a more complex osquery investigation.
+        Use run_query to join processes to users on uid and return 5 rows with pid, process name, path, and username for on-disk processes.
+        Then inspect listening_ports joined to processes and summarize any listeners you find.
+        Mention which tools you used.
+        """,
+    ),
+]
+
+
+SYSTEM_PROMPT = """
+You are an osquery expert. Use the available MCP tools to query system information.
+Prefer search_tables, preview_table, and query_table for discovery and single-table work.
+Use run_query for joins and more complex SQL.
+
+CRITICAL: After using tools, always provide a detailed final answer that includes:
+1. Summary of what you discovered or found
+2. Which specific tools you used and why each one
+3. Key findings from the data (include sample rows if relevant)
+4. Your analysis and conclusions
+
+Do not respond with blank or minimal text. Provide comprehensive explanations.
+"""
 
 
 def run_strands_mcp(requested_model: str):
@@ -182,89 +251,32 @@ def run_strands_mcp(requested_model: str):
     os.environ.setdefault("OSQUERYI_LOCKFILE", "off")
     os.environ.setdefault("OSQUERYI_LOGFILE", "off")
 
-    # Normalize API keys to avoid warnings
+    # google-genai warns when both GEMINI_API_KEY and GOOGLE_API_KEY are set; normalize to one.
     if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
         os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
     elif os.getenv("GOOGLE_API_KEY") and os.getenv("GEMINI_API_KEY"):
-        # If both are set, unset GEMINI_API_KEY to avoid the warning from google-genai
         del os.environ["GEMINI_API_KEY"]
 
     if not server_path:
         logger.error("Error: osqueryi-mcp not found in PATH.")
         return
 
-    # Intelligent model provider detection
-    model = None
-    if requested_model.startswith(("gpt-", "o1-")):
-        if not os.getenv("OPENAI_API_KEY"):
-            logger.error("Error: OPENAI_API_KEY not found in environment.")
-            return
-        model = OpenAIModel(model_id=requested_model)
-        logger.info(f"Using OpenAI model ({requested_model})")
-    elif requested_model.startswith("gemini-"):
-        if not os.getenv("GOOGLE_API_KEY"):
-            logger.error("Error: GOOGLE_API_KEY not found in environment.")
-            return
-        model = GeminiModel(model_id=requested_model)
-        logger.info(f"Using Gemini model ({requested_model})")
-    else:
-        logger.error(f"Error: Unknown model provider for {requested_model}")
+    model = build_model(requested_model)
+    if model is None:
         return
 
-    tasks = [
-        (
-            "Structured discovery",
-            """
-            Use the osquery MCP tools to find account-related tables efficiently.
-            Prefer search_tables first, then preview_table for the best candidates, and explain whether the helper tools reduce round trips compared with list_tables + describe_table.
-            """,
-        ),
-        (
-            "Single-table query",
-            """
-            Investigate processes using the structured helpers.
-            Preview the processes table, then use query_table to return 5 on-disk processes with pid, name, path, uid, and start_time ordered by pid.
-            End with a short note on why query_table is a better fit than raw SQL here.
-            """,
-        ),
-        (
-            "Join-heavy workload",
-            """
-            Run a more complex osquery investigation.
-            Use run_query to join processes to users on uid and return 5 rows with pid, process name, path, and username for on-disk processes.
-            Then inspect listening_ports joined to processes and summarize any listeners you find.
-            Mention which tools you used.
-            """,
-        ),
-    ]
-
-    # 1. Setup transport
     server_params = StdioServerParameters(command=server_path, args=[])
     mcp_client = MCPClient(lambda: stdio_client(server_params))
     stats = RunStats()
 
-    # 2. Attach to Agent
     agent = Agent(
         model=model,
         tools=[mcp_client],
-        system_prompt="""
-        You are an osquery expert. Use the available MCP tools to query system information.
-        Prefer search_tables, preview_table, and query_table for discovery and single-table work.
-        Use run_query for joins and more complex SQL.
-
-        CRITICAL: After using tools, always provide a detailed final answer that includes:
-        1. Summary of what you discovered or found
-        2. Which specific tools you used and why each one
-        3. Key findings from the data (include sample rows if relevant)
-        4. Your analysis and conclusions
-
-        Do not respond with blank or minimal text. Provide comprehensive explanations.
-        """,
+        system_prompt=SYSTEM_PROMPT,
     )
 
-    # 3. Add hooks for visibility
     agent.add_hook(
-        lambda event: log_agent_events(event, stats),
+        lambda event: log_agent_events(event, stats, requested_model),
         [
             BeforeModelCallEvent,
             AfterModelCallEvent,
@@ -274,10 +286,10 @@ def run_strands_mcp(requested_model: str):
     )
 
     try:
-        for title, prompt in tasks:
+        for title, prompt in TASKS:
             stats.reset_task()
             start = time.perf_counter()
-            logger.info(f"\n" + "=" * 20)
+            logger.info("\n" + "=" * 20)
             logger.info(f" TASK: {title}")
             logger.info("=" * 20)
             result = agent(prompt)
@@ -290,11 +302,11 @@ def run_strands_mcp(requested_model: str):
         logger.info(f"\n[Overall Token Totals] {stats.overall_tokens.summary()}")
 
     finally:
-        # Strands requires explicit stopping of the MCP client to close subprocesses
+        # Strands needs an explicit stop to tear down the MCP subprocess.
         mcp_client.stop(None, None, None)
 
 
 if __name__ == "__main__":
-    default_model = "gemini-3.1-flash-lite"
+    default_model = "claude-haiku-4-5"
     model_id = sys.argv[1] if len(sys.argv) > 1 else default_model
     run_strands_mcp(model_id)
