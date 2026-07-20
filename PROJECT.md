@@ -506,7 +506,7 @@ OpenAI uses 5.4x more tokens for "recommended next steps" and "operational notes
 
 ### Modernizing Dependencies & Clean Builds
 **What:** Maintenance and framework updates
-- Updated Go dependencies (`mcp-golang` v0.8.0, `go-sqlite3` v1.14.24, Go 1.23+ toolchain).
+- Updated Go dependencies (`github.com/modelcontextprotocol/go-sdk` v1.6.1, Go toolchain).
 - Updated Python dependencies (`pydantic-ai`, `strands-exec`, `agno`) via `pyproject.toml` and `uv`.
 - Enhanced `make clean` to remove lock files (`osqueryi-mcp.lock`), cache files (`osqueryi-mcp-cache.json`), and log outputs.
 
