@@ -265,7 +265,7 @@ def run_strands_mcp(requested_model: str):
     if model is None:
         return
 
-    server_params = StdioServerParameters(command=server_path, args=[])
+    server_params = StdioServerParameters(command=server_path, args=[], env=dict(os.environ))
     mcp_client = MCPClient(lambda: stdio_client(server_params))
     stats = RunStats()
 

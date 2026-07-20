@@ -88,34 +88,55 @@ To use `osqueryi-mcp` with an MCP client (like Claude Desktop), add it to your c
 
 - `make build`: Compiles the binary.
 - `make run`: Runs the server directly using `go run`.
-- `make test`: Runs Go unit tests.
+- `make test`: Runs the Go test suite (`go test ./...`).
 - `make fmt`: Formats the source code.
 - `make vet`: Runs Go static analysis.
 - `make clean`: Removes the compiled binary and lock files.
 
 ### Testing
 
-An end-to-end test script is provided in Python using `uv`.
+The repository currently provides a direct MCP smoke harness and live LLM
+integration/benchmark harnesses. They require a built `osqueryi-mcp` binary in
+the project root, a working `osqueryi` installation, and Python dependencies
+managed by `uv`.
+
+These scripts exercise the local machine's live osquery data. The LLM harnesses
+also make billable provider API calls, so they are exploratory integration
+checks rather than deterministic regression tests.
 
 ### Basic Smoke Test
 ```bash
 uv run tools/test_mcp.py
 ```
-This smoke test exercises both the original tools and the structured helpers (`search_tables`, `preview_table`, and `query_table`).
+This starts the local server over stdio and invokes every MCP tool, including
+the expected failing raw-SQL query. It prints protocol and tool responses for
+manual inspection; it is not assertion-based.
+
+The convenience runner builds the binary, runs this smoke harness, then runs
+the Agno and Strands harnesses for every non-comment model in `models.txt`:
+
+```bash
+./run_tests.sh
+```
+
+It does not run the Pydantic AI harness.
 
 ### Framework-Specific Examples
 These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using popular Python frameworks:
 
-- **Agno (Phidata)**: `uv run tools/agno_test_mcp.py`
-- **Strands (AWS)**: `uv run tools/strands_test_mcp.py [model_id]`
-- **Pydantic AI**: `uv run tools/pydantic_ai_test_mcp.py [model_id]`
+- **Agno (Phidata)**: `uv run tools/agno_test_mcp.py [model_id]` — default: `gemini-3.1-flash-lite-preview`
+- **Strands (AWS)**: `uv run tools/strands_test_mcp.py [model_id]` — default: `claude-haiku-4-5`
+- **Pydantic AI**: `uv run tools/pydantic_ai_test_mcp.py [model_id]` — default: `claude-haiku-4-5`
 
-*Note: These require `OPENAI_API_KEY` or `GOOGLE_API_KEY` to be set. For Strands and Pydantic AI, the default model is `gemini-3.1-flash-lite`.*
+Set the API key for the selected provider: `OPENAI_API_KEY` for OpenAI,
+`GOOGLE_API_KEY` (or `GEMINI_API_KEY` where supported) for Gemini, or
+`ANTHROPIC_API_KEY` for Claude. The harnesses disable the MCP PID lock and
+server logfile so they can start their own temporary stdio server.
 
-To run with debug logging enabled and view the output:
+To run the smoke harness with debug logging written to a file:
 
 ```bash
-OSQUERYI_DEBUG=1 uv run tools/test_mcp.py
+OSQUERYI_DEBUG=1 OSQUERYI_LOGFILE=osqueryi-mcp.log uv run tools/test_mcp.py
 tail -f osqueryi-mcp.log
 ```
 

@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities.hooks import Hooks
-from pydantic_ai.mcp import MCPServerStdio
+from pydantic_ai.mcp import MCPToolset, StdioTransport
 from pydantic_ai.models import ModelRequestContext, ModelResponse
 
 
@@ -35,7 +35,7 @@ logger = logging.getLogger("pydantic_ai_test")
 # (bare_model_prefixes, provider_prefix_to_apply, api_key_envs)
 PROVIDERS = [
     (("gpt-", "o1-"), "openai:", ("OPENAI_API_KEY",)),
-    (("gemini-",), "google-gla:", ("GOOGLE_API_KEY", "GEMINI_API_KEY")),
+    (("gemini-",), "google:", ("GOOGLE_API_KEY", "GEMINI_API_KEY")),
     (("claude-",), "anthropic:", ("ANTHROPIC_API_KEY",)),
 ]
 
@@ -177,7 +177,7 @@ async def run_pydantic_ai_mcp(requested_model: str):
 
     stats = RunStats()
 
-    async with MCPServerStdio(server_path, max_retries=3, args=[]) as server:
+    async with MCPToolset(StdioTransport(server_path, args=[])) as server:
         agent = Agent(
             model_name,
             toolsets=[server],
@@ -198,7 +198,7 @@ async def run_pydantic_ai_mcp(requested_model: str):
                 logger.info("\n[Final Answer]")
                 logger.info(result.output)
 
-                stats.update(result.usage())
+                stats.update(result.usage)
 
                 logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
                 elapsed_ms = (time.perf_counter() - start) * 1000

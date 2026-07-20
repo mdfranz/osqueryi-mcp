@@ -33,6 +33,7 @@ go.work.sum
 *.log
 *.json
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Python artifacts
+*.egg-info/
+.venv/
+
