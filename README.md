@@ -146,6 +146,7 @@ tail -f osqueryi-mcp.log
 - [Optimization Results](TUNING.md): Detailed benchmarks and key findings on token efficiency, model comparisons (Gemini vs OpenAI), and system prompting.
 
 ### Technical References
+- [Dependencies & Package Classification](PKG.md): Classification and enumeration of 3rd party Go, Python, and system dependencies.
 - [Python MCP Client Guide](refs/PYTHON_MCP_CLIENT.md): Technical reference for building Python clients with Agno, Strands, and Pydantic AI.
 - [SQL MCP Architecture Patterns](refs/SQL-MCP.md): Deep dive into advanced patterns for schema discovery and progressive disclosure.
 - [Go MCP Server Guide](refs/MCP-SQL-GUIDE.md): Best practices for building Go-based MCP servers for local command execution.
