@@ -1,21 +1,5 @@
 # osqueryi-mcp: Development Journey
 
----
-
-## The Beginning: Why This Project?
-
-**Problem Statement (Early 2026):**
-- osquery is powerful for system queries but LLMs can't execute it directly
-- Existing tools require either raw SQL (hard for agents) or pre-built queries (inflexible)
-- Need: A way for LLM agents to discover and query system state on the fly
-
-**Insight:**
-Model Context Protocol (MCP) is Anthropic's new standard for connecting LLMs to tools. Perfect fit.
-
-**Decision:** Build an MCP server wrapping osqueryi with an intelligent tool hierarchy.
-
----
-
 ## Phase 1: Foundation (Commits 001b7db - 2c7a2bc)
 
 ### Commit 001b7db - Initial commit
@@ -586,4 +570,3 @@ osqueryi-mcp went from a working but unoptimized 70,901-token solution to a tune
 3. **Maintainability**: Go unit tests, protocol assertion harness, and multi-model runner.
 
 The journey shows that building high-quality AI tool integrations requires continuous discovery across tool design, server safety, and test automation.
-
