@@ -1,27 +1,27 @@
 # osqueryi-mcp
 
-`osqueryi-mcp` is a Model Context Protocol (MCP) server written in Go that exposes the local system's [osquery](https://osquery.io/) tables as queryable tools. It wraps the `osqueryi` interactive shell via STDIN/STDOUT transport, allowing LLMs and other MCP clients to inspect and query system state using SQL.
+`osqueryi-mcp` is a Model Context Protocol (MCP) server written in Go that exposes the local system's [osquery](https://osquery.io/) tables as queryable tools. The MCP server communicates with its client over stdio; when an operation needs uncached osquery data, it starts `osqueryi` as a subprocess and reads its JSON output. This lets MCP clients inspect and query local system state using SQL.
 
 ## Features
 
-- **Runtime Discovery**: Automatically discovers available tables and schemas based on the installed osquery version.
-- **Progressive Disclosure**: Three primary tools allow for efficient exploration:
+- **Runtime Discovery**: Discovers the tables and schemas exposed by the installed `osqueryi` binary. Persisted cache data is reused until it is refreshed or removed.
+- **Progressive Disclosure**: Three primary tools support table exploration:
   - `list_tables`: List all available osquery tables on the current system.
   - `describe_table`: Get the schema (columns and types) for a specific table.
-  - `run_query`: Execute arbitrary SQL `SELECT` queries and receive results in JSON format.
+  - `run_query`: Execute SQL through `osqueryi`, including joins, and receive a JSON response subject to the server's output limits.
 - **Workflow Helpers**: Additional tools reduce common multi-step loops:
   - `search_tables`: Find relevant tables by table or column name.
   - `preview_table`: Return schema plus sample rows in one call.
-  - `query_table`: Build validated single-table queries from structured arguments.
+  - `query_table`: Build a single-table query with validated table, column, ordering, and limit arguments.
   - `refresh_cache`: Clear and reload the cached list of tables and their schemas.
-- **Safety**: Includes table name validation and uses `--config_path=/dev/null` to ensure clean execution across different environments.
-- **Observability**: Structured logging (via `slog`) to `osqueryi-mcp.log` by default, and a PID lock mechanism to prevent multiple conflicting instances.
+- **Guardrails**: Structured tools validate table names and known columns. `run_query` intentionally passes its SQL through to `osqueryi`; it is not restricted to a SELECT-only subset. Every invocation uses `--config_path=/dev/null` to ignore the normal osquery configuration file on Unix-like systems.
+- **Observability**: Structured logging (via `slog`) goes to `osqueryi-mcp.log` by default. A PID lock prevents another server using the same configured lock file from starting.
 
 ## Prerequisites
 
-- **osquery**: You must have `osquery` installed on your system. The `osqueryi` binary should be in your `PATH`.
+- **osquery**: You must have `osquery` installed on your system. Make `osqueryi` available on `PATH`, or set `OSQUERYI_PATH` to its full path.
   - [Installation Guide for osquery](https://osquery.io/downloads)
-- **Go**: Version 1.22 or later (required to build from source).
+- **Go**: Version 1.26.5 or later (required to build from source).
 
 ## Installation
 
@@ -39,8 +39,9 @@
    ```
    This will create an `osqueryi-mcp` binary in the project root.
 
-3. (Optional) Install to `~/.local/bin`:
+3. (Optional) Install to `~/.local/bin` (create the directory first if needed, and ensure it is on `PATH`):
    ```bash
+   mkdir -p ~/.local/bin
    make install
    ```
 
@@ -59,24 +60,30 @@ The server is configured via environment variables:
 
 ## Caching
 
-`osqueryi-mcp` uses a local JSON file to cache osquery table names and their schemas. This significantly improves performance for tools like `search_tables`, `preview_table`, and `query_table` that need to know column definitions before executing.
+`osqueryi-mcp` uses a local JSON file to cache osquery table names and their schemas. This reduces repeated schema lookups for tools such as `search_tables`, `preview_table`, and `query_table`.
 
 - **On-Disk Persistence**: The cache is saved to disk so it persists across server restarts.
-- **Background Warming**: Upon startup, the server automatically starts a background process to "warm" the cache by fetching any missing schemas.
-- **Auto-Update**: Whenever a new table is described via `describe_table` or `preview_table`, the cache is updated.
+- **Background Warming**: On startup, the server attempts to fetch any missing schemas in a background task.
+- **Auto-Update**: Schemas fetched by `describe_table` or `preview_table` are saved to the cache.
 - **Manual Refresh**: Use the `refresh_cache` tool to force a full reload of all table schemas from `osqueryi`.
 - **Disabling**: Set `OSQUERYI_CACHEFILE=off` to disable persistent caching entirely.
 
+The cache does not record the `osqueryi` version or check schema freshness. Run `refresh_cache` after upgrading or reconfiguring osquery, or remove the cache file to force rediscovery on the next start.
+
+## Result Limits
+
+`run_query`, `query_table`, and `preview_table` limit returned data to keep MCP responses manageable. Results are truncated when they exceed the row or payload limits; the response includes a `truncated` indicator when truncation occurs. `run_query` and `query_table` return at most 100 rows after response processing, while `preview_table` accepts at most 100 rows. A requested `query_table` limit is capped at 1,000 rows before response processing. The server attempts to keep JSON payloads below approximately 16 KiB; a single oversized row can still exceed that target.
+
 ## Usage with MCP Clients
 
-To use `osqueryi-mcp` with an MCP client (like Claude Desktop), add it to your configuration file:
+To use an installed `osqueryi-mcp` binary with an MCP client (like Claude Desktop), add it to your configuration file. If you built from source without installing it, use the absolute path to the binary instead.
 
 ### MCP Configuration
 ```json
 {
   "mcpServers": {
     "osqueryi-mcp": {
-      "command": "osqueryi-mcp" 
+      "command": "/absolute/path/to/osqueryi-mcp"
     }
   }
 }
@@ -95,10 +102,11 @@ To use `osqueryi-mcp` with an MCP client (like Claude Desktop), add it to your c
 
 ### Testing
 
-The repository currently provides a direct MCP smoke harness and live LLM
-integration/benchmark harnesses. They require a built `osqueryi-mcp` binary in
-the project root, a working `osqueryi` installation, and Python dependencies
-managed by `uv`.
+The repository provides a direct MCP smoke harness and live LLM
+integration/benchmark harnesses. They require a working `osqueryi` installation
+and Python dependencies run through `uv`. The smoke harness resolves a built
+`osqueryi-mcp` binary from the project root; the framework harnesses require
+`osqueryi-mcp` on `PATH`.
 
 These scripts exercise the local machine's live osquery data. The LLM harnesses
 also make billable provider API calls, so they are exploratory integration
@@ -129,8 +137,15 @@ These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using pop
 
 Set the API key for the selected provider: `OPENAI_API_KEY` for OpenAI,
 `GOOGLE_API_KEY` (or `GEMINI_API_KEY` where supported) for Gemini, or
-`ANTHROPIC_API_KEY` for Claude. The harnesses disable the MCP PID lock and
-server logfile so they can start their own temporary stdio server.
+`ANTHROPIC_API_KEY` for Claude. The harnesses default the MCP PID lock and
+server logfile to `off` so they can start their own temporary stdio server;
+explicitly supplied environment values take precedence.
+
+For a framework example after building in the project root without installing:
+
+```bash
+PATH="$PWD:$PATH" uv run tools/agno_test_mcp.py
+```
 
 To run the smoke harness with debug logging written to a file:
 
@@ -142,7 +157,7 @@ tail -f osqueryi-mcp.log
 ## Documentation & Guides
 
 ### Project & Optimization
-- [Development Journey](PROJECT.md): The narrative of how `osqueryi-mcp` evolved from MVP to a tuned production-ready server.
+- [Development Journey](PROJECT.md): The narrative of how `osqueryi-mcp` evolved from its MVP through subsequent implementation and tuning work.
 - [Optimization Results](TUNING.md): Detailed benchmarks and key findings on token efficiency, model comparisons (Gemini vs OpenAI), and system prompting.
 
 ### Technical References
@@ -154,4 +169,4 @@ tail -f osqueryi-mcp.log
 
 ## License
 
-[Specify License, e.g., MIT]
+No license has been specified for this repository.
