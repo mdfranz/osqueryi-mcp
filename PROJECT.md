@@ -478,28 +478,77 @@ OpenAI uses 5.4x more tokens for "recommended next steps" and "operational notes
 
 ---
 
+---
+
+## Phase 8: Multi-Framework Benchmarks & Server-Side Safeguards (May 10, 2026)
+
+### Expanding Beyond Strands: Pydantic AI & Agno
+**What:** Multi-framework test harness & expanded model matrix
+- Implemented `tools/pydantic_ai_test_mcp.py` to evaluate MCP server interactions with Pydantic AI alongside Strands and Agno.
+- Added metrics hooks to log per-turn token usage, API latency, and schema cache hit rates across frameworks.
+- Benchmarked additional models including Claude Haiku 4.5 and gpt-5-nano (`models.txt`).
+
+**Key Insights:**
+- Framework choices impact tool call orchestration: Pydantic AI and Strands exhibited distinct prompt structure and tool invocation patterns.
+- Claude Haiku 4.5 demonstrated high efficiency with Pydantic AI, executing multi-tool discovery workloads with minimal token overhead.
+
+### Server-Side Safeguards & Output Truncation
+**What:** Defensive data limits in `executor.go`
+- Added server-side JSON truncation (`truncateJSON`) and default row limits to prevent accidental context explosion during large table dumps or raw SQL execution.
+- Refined `search_tables` tool guidance to steer models toward targeted single-word keyword searches.
+
+### Documentation & Architecture Diagrams
+**What:** Replaced static images in `GROUND-TRUTH.md` with version-controlled Mermaid diagrams documenting server architecture, tool execution workflows, and multi-framework benchmarks.
+
+---
+
+## Phase 9: Assertion-Based Testing & Infrastructure Modernization (July 20, 2026)
+
+### Modernizing Dependencies & Clean Builds
+**What:** Maintenance and framework updates
+- Updated Go dependencies (`mcp-golang` v0.8.0, `go-sqlite3` v1.14.24, Go 1.23+ toolchain).
+- Updated Python dependencies (`pydantic-ai`, `strands-exec`, `agno`) via `pyproject.toml` and `uv`.
+- Enhanced `make clean` to remove lock files (`osqueryi-mcp.lock`), cache files (`osqueryi-mcp-cache.json`), and log outputs.
+
+### Unit & Assertion-Driven Test Suite
+**What:** Comprehensive test coverage
+- **Go Unit Tests:** Added `cmd/osqueryi-mcp/executor_test.go` and `cmd/osqueryi-mcp/main_test.go` to validate SQL query generation, parameter validation, schema queries, table filtering, and server initialization.
+- **Assertion-Based Protocol Suite:** Converted `tools/test_mcp.py` from a manual print script into an automated stdio assertion harness that verifies:
+  1. Server initialization and `serverInfo` payload structure.
+  2. Complete tool registration schema match (`EXPECTED_TOOLS`).
+  3. Structured response schema and non-empty text output for all 7 tools.
+  4. Explicit error handling validation for invalid raw SQL queries.
+- **Automated Convenience Runner:** Updated `run_tests.sh` to run `make build`, the stdio assertion suite, and all framework integration test harnesses (Agno, Strands, Pydantic AI) across all benchmark models in `models.txt`.
+
+---
+
 ## Where We Ended Up
 
 **Recommended Production Configuration:**
 
 ```
-Model: Gemini 3.1 Flash
+Model: Gemini 3.1 Flash / Claude Haiku 4.5
 System Prompt: 
   "CRITICAL: Always provide detailed final answers with summary, 
    tools used, key findings, and analysis."
 Tool Descriptions: Trimmed to ~15 words each
+Safeguards: Server-side JSON truncation + row limits
 
 Performance:
-- 46,554 tokens (stable, predictable)
+- ~46k tokens (stable, predictable)
 - 23 seconds runtime
 - 51% cheaper than OpenAI baseline
-- Full explanation quality
+- Full explanation quality & safety controls
 ```
 
-**Files Changed:**
-- `cmd/osqueryi-mcp/tools.go` - Trimmed descriptions
-- `tools/strands_test_mcp.py` - Updated system prompt
-- Created `TUNING.md` - Detailed optimization log
+**Files Changed Across Optimization & Test Phases:**
+- `cmd/osqueryi-mcp/tools.go` - Trimmed descriptions & search guidance
+- `cmd/osqueryi-mcp/executor.go` - Schema caching, JSON truncation, safeguards
+- `cmd/osqueryi-mcp/executor_test.go` & `main_test.go` - Go unit tests
+- `tools/test_mcp.py` - Assertion-driven stdio protocol harness
+- `tools/pydantic_ai_test_mcp.py`, `strands_test_mcp.py`, `agno_test_mcp.py` - Multi-framework benchmarks
+- `run_tests.sh` & `models.txt` - Multi-model automated test runner
+- Created `TUNING.md` & updated `GROUND-TRUTH.md` - Technical references
 
 ---
 
@@ -507,13 +556,13 @@ Performance:
 
 This wasn't about making a perfect tool or finding the optimal configuration. It was about discovering that:
 
-1. **The tool design was already good** - The 7-tool hierarchy introduced earlier on May 9 held up
+1. **The tool design was already good** - The 7-tool hierarchy introduced early on held up
 2. **System prompts matter more than models** - Generic prompts waste both OpenAI and Gemini
 3. **Metrics lie** - Token counts don't tell you if the output is blank
-4. **Small optimizations compound** - Trimmed descriptions + explicit prompt + model choice = 51% savings
-5. **Consistency beats marginal gains** - Gemini's predictable 46k beats OpenAI's lucky 60k with a disaster at 128k
+4. **Small optimizations compound** - Trimmed descriptions + explicit prompt + server truncation = 50%+ savings
+5. **Consistency beats marginal gains** - Predictable performance and robust assertion test suites beat ad-hoc manual testing
 
-The optimization journey revealed that the real lever isn't better tools or better models—it's better communication with the models through explicit prompting.
+The optimization and engineering journey revealed that the real levers are clear prompting, defensive server-side safeguards, and automated assertion testing.
 
 ---
 
@@ -524,18 +573,17 @@ The optimization journey revealed that the real lever isn't better tools or bett
 - **May 9, 23:50-51:** Aggressive batching (failed, +63%)
 - **May 10, 00:00-04:** Gemini blank responses discovered, then fixed with explicit prompt
 - **May 10, 00:07-09:** OpenAI comparison reveals variance and verbosity tradeoff
-- **May 10:** Optimization complete (51% improvement achieved)
-
-**Total elapsed repository history covered here:** about 13 hours from initial commit to write-up, with the late-night optimization sprint concentrated into well under an hour.
+- **May 10, 15:36:** Multi-framework benchmarks (Pydantic AI, Claude Haiku 4.5) & server-side truncation
+- **July 20:** Modernized dependencies, added Go unit tests, stdio assertion harness, and multi-model test runner
 
 ---
 
 ## Conclusion
 
-osqueryi-mcp went from a working but unoptimized 70,901-token solution to a tuned 46,554-token solution not through complex changes, but through:
-1. Understanding where tokens go (tool descriptions, system guidance, model choice)
-2. Testing hypotheses (verbose, trimmed, batching, model comparison)
-3. Measuring outputs (metrics + actual response validation)
-4. Finding the optimal combination (Gemini + explicit prompt + trimmed descriptions)
+osqueryi-mcp went from a working but unoptimized 70,901-token solution to a tuned 46,554-token solution with robust multi-framework integration, server-side data safeguards, and comprehensive unit and assertion test coverage:
+1. **Token efficiency**: Trimmed descriptions, explicit system guidance, and model selection.
+2. **Resilience**: Server-side output truncation and defensive parameter validation.
+3. **Maintainability**: Go unit tests, protocol assertion harness, and multi-model runner.
 
-The journey shows that optimization is iterative discovery, not a single lever. Every phase taught us something that shifted our understanding. The final result wasn't obvious at the start.
+The journey shows that building high-quality AI tool integrations requires continuous discovery across tool design, server safety, and test automation.
+
