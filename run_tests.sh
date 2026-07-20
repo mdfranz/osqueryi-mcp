@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Exit on error
-set -e
+set -euo pipefail
 
 # Parse arguments
 USE_LOGS=false
@@ -73,6 +73,10 @@ for MODEL in "${MODELS[@]}"; do
     echo ""
     echo "--- Running Strands integration test (strands_test_mcp.py) ---"
     uv run python tools/strands_test_mcp.py "$MODEL"
+
+    echo ""
+    echo "--- Running Pydantic AI integration test (pydantic_ai_test_mcp.py) ---"
+    uv run python tools/pydantic_ai_test_mcp.py "$MODEL"
 done
 
 echo ""

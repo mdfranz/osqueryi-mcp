@@ -24,4 +24,4 @@ install: build
 	cp $(APP_NAME) ~/.local/bin/
 
 clean:
-	rm -f $(APP_NAME)
+	rm -f $(APP_NAME) osqueryi-mcp.lock osqueryi-mcp-cache.json osqueryi-mcp.log

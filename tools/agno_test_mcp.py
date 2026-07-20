@@ -293,12 +293,11 @@ async def run_agno_mcp(model_id: str):
         del os.environ["GEMINI_API_KEY"]
 
     if not server_path:
-        logger.error("Error: osqueryi-mcp not found in PATH.")
-        return
+        raise RuntimeError("osqueryi-mcp not found in PATH")
 
     model = build_model(model_id)
     if model is None:
-        return
+        raise RuntimeError(f"could not configure model: {model_id}")
 
     stats = RunStats()
 

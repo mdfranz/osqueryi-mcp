@@ -37,6 +37,11 @@ PROVIDERS = [
     (("gpt-", "o1-"), "openai:", ("OPENAI_API_KEY",)),
     (("gemini-",), "google:", ("GOOGLE_API_KEY", "GEMINI_API_KEY")),
     (("claude-",), "anthropic:", ("ANTHROPIC_API_KEY",)),
+    (
+        ("deepseek/", "deepseek-", "openrouter/", "qwen/", "qwen-"),
+        "openrouter:",
+        ("OPENROUTER_API_KEY",),
+    ),
 ]
 
 
@@ -44,10 +49,14 @@ def resolve_model(requested: str) -> str | None:
     """Add a provider prefix if missing and verify the API key. Returns None if a key is missing."""
     name = requested
     if ":" not in name:
+        matched = False
         for prefixes, provider, _ in PROVIDERS:
             if name.startswith(prefixes):
                 name = provider + name
+                matched = True
                 break
+        if not matched and "/" in name:
+            name = "openrouter:" + name
 
     for _, provider, env_keys in PROVIDERS:
         if name.startswith(provider):
@@ -149,12 +158,11 @@ async def run_pydantic_ai_mcp(requested_model: str):
     os.environ.setdefault("OSQUERYI_LOGFILE", "off")
 
     if not server_path:
-        logger.error("Error: osqueryi-mcp not found in PATH.")
-        return
+        raise RuntimeError("osqueryi-mcp not found in PATH")
 
     model_name = resolve_model(requested_model)
     if model_name is None:
-        return
+        raise RuntimeError(f"could not configure model: {requested_model}")
 
     logger.info(f"Using model: {model_name}")
 
@@ -208,6 +216,7 @@ async def run_pydantic_ai_mcp(requested_model: str):
 
         except Exception as e:
             logger.exception(f"An error occurred during agent execution: {e}")
+            raise
 
 
 if __name__ == "__main__":

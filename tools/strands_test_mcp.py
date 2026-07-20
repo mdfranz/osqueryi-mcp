@@ -258,12 +258,11 @@ def run_strands_mcp(requested_model: str):
         del os.environ["GEMINI_API_KEY"]
 
     if not server_path:
-        logger.error("Error: osqueryi-mcp not found in PATH.")
-        return
+        raise RuntimeError("osqueryi-mcp not found in PATH")
 
     model = build_model(requested_model)
     if model is None:
-        return
+        raise RuntimeError(f"could not configure model: {requested_model}")
 
     server_params = StdioServerParameters(command=server_path, args=[], env=dict(os.environ))
     mcp_client = MCPClient(lambda: stdio_client(server_params))

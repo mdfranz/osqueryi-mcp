@@ -91,7 +91,7 @@ To use `osqueryi-mcp` with an MCP client (like Claude Desktop), add it to your c
 - `make test`: Runs the Go test suite (`go test ./...`).
 - `make fmt`: Formats the source code.
 - `make vet`: Runs Go static analysis.
-- `make clean`: Removes the compiled binary and lock files.
+- `make clean`: Removes the compiled binary plus the default lock, cache, and log files.
 
 ### Testing
 
@@ -108,18 +108,17 @@ checks rather than deterministic regression tests.
 ```bash
 uv run tools/test_mcp.py
 ```
-This starts the local server over stdio and invokes every MCP tool, including
-the expected failing raw-SQL query. It prints protocol and tool responses for
-manual inspection; it is not assertion-based.
+This starts the local server over stdio, verifies initialization and the tool
+catalog, and invokes every MCP tool. It fails on protocol errors, unexpected
+tool failures, or a missing expected error for an invalid raw-SQL query.
 
 The convenience runner builds the binary, runs this smoke harness, then runs
-the Agno and Strands harnesses for every non-comment model in `models.txt`:
+the Agno, Strands, and Pydantic AI harnesses for every non-comment model in
+`models.txt`:
 
 ```bash
 ./run_tests.sh
 ```
-
-It does not run the Pydantic AI harness.
 
 ### Framework-Specific Examples
 These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using popular Python frameworks:
