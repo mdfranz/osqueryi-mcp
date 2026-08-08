@@ -75,7 +75,10 @@ PROVIDERS = [
     (
         ("deepseek/", "deepseek-", "openrouter/", "qwen/", "qwen-"),
         ("OPENROUTER_API_KEY",),
-        lambda model_id: OpenRouter(id=model_id),
+        # OpenRouter's own default max_tokens is 1024 — too low for the longer analysis
+        # tasks, where it silently truncates the final answer mid-sentence instead of
+        # erroring. 8192 matches the headroom given to the other providers.
+        lambda model_id: OpenRouter(id=model_id, max_tokens=8192),
         "OpenRouter",
     ),
 ]

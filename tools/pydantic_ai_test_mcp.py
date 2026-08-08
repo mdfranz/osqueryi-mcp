@@ -200,6 +200,11 @@ async def run_pydantic_ai_mcp(requested_model: str):
             toolsets=[server],
             capabilities=[hooks],
             system_prompt=system_prompt,
+            # Default is 1: a single bad run_query (wrong column name, etc.) exhausts it and
+            # crashes the whole run instead of letting the model self-correct, which weaker
+            # models hit often on the harder tasks. Agno/Strands tolerate more attempts by
+            # default, so this also makes the three harnesses more comparable.
+            retries=3,
         )
 
         try:
