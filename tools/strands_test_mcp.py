@@ -6,6 +6,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import logfire
+
+# Strands auto-detects the global OTel tracer provider set by logfire.configure() below (it has
+# no dedicated logfire.instrument_strands() — per
+# https://pydantic.dev/docs/logfire/integrations/llms/strands/, plain configure() is enough and
+# calling StrandsTelemetry().setup_otlp_exporter() would conflict with it). This semconv opt-in
+# must be set before strands builds its Tracer (lazily, on first Agent use), so set it early.
+os.environ.setdefault(
+    "OTEL_SEMCONV_STABILITY_OPT_IN", "gen_ai_latest_experimental,gen_ai_span_attributes_only"
+)
+
 from mcp import StdioServerParameters
 from mcp.client.stdio import stdio_client
 from strands import Agent
@@ -20,13 +31,29 @@ from strands.models.gemini import GeminiModel
 from strands.models.openai import OpenAIModel
 from strands.tools.mcp import MCPClient
 
+from build_metadata import git_revision
+from prompt_suite import load_prompt_suite
 
-def setup_logging(log_file: str, debug_libs: tuple[str, ...]) -> None:
+logfire.configure(
+    service_name="strands-test-mcp",
+    service_version=git_revision(),
+    environment=os.getenv("LOGFIRE_ENVIRONMENT", "local"),
+)
+logfire.instrument_mcp()  # client-side spans for calls to the osqueryi-mcp stdio server
+
+QUIET_LIBS = ("httpcore", "hpack")  # frame-by-frame transport decode noise; not useful at DEBUG
+
+
+def setup_logging(log_file: str, debug_libs: tuple[str, ...], quiet_libs: tuple[str, ...] = ()) -> None:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(),
+            logfire.LogfireLoggingHandler(),  # forward existing stdlib log calls to Logfire too
+        ],
     )
     # Console at INFO; file stays at DEBUG. `type(h) is` (not isinstance) avoids matching FileHandler.
     for h in logging.root.handlers:
@@ -34,11 +61,17 @@ def setup_logging(log_file: str, debug_libs: tuple[str, ...]) -> None:
             h.setLevel(logging.INFO)
     for name in debug_libs:
         logging.getLogger(name).setLevel(logging.DEBUG)
+    # These inherit DEBUG from the root logger regardless of debug_libs, and the file/Logfire
+    # sinks aren't capped at INFO like the console is, so they flood both. This overrides the
+    # explicit "httpcore" entry below (kept for local file/console debugging pre-Logfire).
+    for name in quiet_libs:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 setup_logging(
     "strands_test.log",
     ("mcp", "httpx", "httpcore", "openai", "google.genai"),
+    QUIET_LIBS,
 )
 logger = logging.getLogger("strands_test")
 
@@ -52,6 +85,15 @@ PROVIDERS = [
         "ANTHROPIC_API_KEY",
         lambda m: AnthropicModel(model_id=m, max_tokens=8192),
         "Anthropic",
+    ),
+    (
+        ("deepseek/", "deepseek-", "openrouter/", "qwen/", "qwen-"),
+        "OPENROUTER_API_KEY",
+        lambda m: OpenAIModel(
+            client_args={"base_url": "https://openrouter.ai/api/v1", "api_key": os.getenv("OPENROUTER_API_KEY")},
+            model_id=m,
+        ),
+        "OpenRouter",
     ),
 ]
 
@@ -189,6 +231,18 @@ def log_agent_events(event, stats: RunStats, model_id: str):
                 stats.task_tokens.add(usage)
                 stats.overall_tokens.add(usage)
                 logger.info(f"[Agent] Model call finished | Model: {model_id} | Tokens: {_format_usage(usage)}")
+                # Structured, queryable counterpart to the log line above. Strands' own OTel
+                # spans (via the global tracer provider) already carry usage; this makes it
+                # easy to find/filter/alert on directly without digging into span attributes.
+                logfire.info(
+                    "Model call finished: {model_id}",
+                    model_id=model_id,
+                    input_tokens=usage["input_tokens"],
+                    output_tokens=usage["output_tokens"],
+                    total_tokens=usage["total_tokens"],
+                    cache_read_tokens=usage["cache_read_input_tokens"],
+                    cache_write_tokens=usage["cache_write_input_tokens"],
+                )
             else:
                 logger.info(f"[Agent] Model call finished | Model: {model_id} | Tokens: unavailable")
         case BeforeToolCallEvent():
@@ -201,49 +255,6 @@ def log_agent_events(event, stats: RunStats, model_id: str):
             if len(res_str) > 500:
                 res_str = res_str[:500] + "... (truncated)"
             logger.info(f"  Output: {res_str}")
-
-
-TASKS = [
-    (
-        "Structured discovery",
-        """
-        Use the osquery MCP tools to find account-related tables efficiently.
-        Prefer search_tables first, then preview_table for the best candidates, and explain whether the helper tools reduce round trips compared with list_tables + describe_table.
-        """,
-    ),
-    (
-        "Single-table query",
-        """
-        Investigate processes using the structured helpers.
-        Preview the processes table, then use query_table to return 5 on-disk processes with pid, name, path, uid, and start_time ordered by pid.
-        End with a short note on why query_table is a better fit than raw SQL here.
-        """,
-    ),
-    (
-        "Join-heavy workload",
-        """
-        Run a more complex osquery investigation.
-        Use run_query to join processes to users on uid and return 5 rows with pid, process name, path, and username for on-disk processes.
-        Then inspect listening_ports joined to processes and summarize any listeners you find.
-        Mention which tools you used.
-        """,
-    ),
-]
-
-
-SYSTEM_PROMPT = """
-You are an osquery expert. Use the available MCP tools to query system information.
-Prefer search_tables, preview_table, and query_table for discovery and single-table work.
-Use run_query for joins and more complex SQL.
-
-CRITICAL: After using tools, always provide a detailed final answer that includes:
-1. Summary of what you discovered or found
-2. Which specific tools you used and why each one
-3. Key findings from the data (include sample rows if relevant)
-4. Your analysis and conclusions
-
-Do not respond with blank or minimal text. Provide comprehensive explanations.
-"""
 
 
 def run_strands_mcp(requested_model: str):
@@ -264,6 +275,8 @@ def run_strands_mcp(requested_model: str):
     if model is None:
         raise RuntimeError(f"could not configure model: {requested_model}")
 
+    system_prompt, tasks = load_prompt_suite()
+
     server_params = StdioServerParameters(command=server_path, args=[], env=dict(os.environ))
     mcp_client = MCPClient(lambda: stdio_client(server_params))
     stats = RunStats()
@@ -271,7 +284,7 @@ def run_strands_mcp(requested_model: str):
     agent = Agent(
         model=model,
         tools=[mcp_client],
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
     )
 
     agent.add_hook(
@@ -285,20 +298,40 @@ def run_strands_mcp(requested_model: str):
     )
 
     try:
-        for title, prompt in TASKS:
-            stats.reset_task()
-            start = time.perf_counter()
-            logger.info("\n" + "=" * 20)
-            logger.info(f" TASK: {title}")
-            logger.info("=" * 20)
-            result = agent(prompt)
-            logger.info("\n[Final Answer]")
-            logger.info(result)
-            logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.info(f"\n[elapsed: {elapsed_ms:.1f} ms]")
+        for task in tasks:
+            title, prompt = task.title, task.prompt
+            with logfire.span("task: {title}", title=title):
+                stats.reset_task()
+                start = time.perf_counter()
+                logger.info("\n" + "=" * 20)
+                logger.info(f" TASK: {title}")
+                logger.info("=" * 20)
+                result = agent(prompt)
+                logger.info("\n[Final Answer]")
+                logger.info(result)
+                logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                logger.info(f"\n[elapsed: {elapsed_ms:.1f} ms]")
+
+                logfire.info(
+                    "Task completed: {title}",
+                    title=title,
+                    elapsed_ms=elapsed_ms,
+                    input_tokens=stats.task_tokens.input_tokens,
+                    output_tokens=stats.task_tokens.output_tokens,
+                    total_tokens=stats.task_tokens.total_tokens,
+                    cache_read_tokens=stats.task_tokens.cache_read_input_tokens,
+                )
 
         logger.info(f"\n[Overall Token Totals] {stats.overall_tokens.summary()}")
+        logfire.info(
+            "All tasks completed",
+            task_count=len(tasks),
+            input_tokens=stats.overall_tokens.input_tokens,
+            output_tokens=stats.overall_tokens.output_tokens,
+            total_tokens=stats.overall_tokens.total_tokens,
+            cache_read_tokens=stats.overall_tokens.cache_read_input_tokens,
+        )
 
     finally:
         # Strands needs an explicit stop to tear down the MCP subprocess.

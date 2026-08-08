@@ -8,28 +8,58 @@ from dataclasses import dataclass, field
 from inspect import isawaitable
 from typing import Any, Callable
 
+import logfire
 from agno.agent import Agent
 from agno.models.anthropic import Claude
 from agno.models.google import Gemini
 from agno.models.openai import OpenAIChat
+from agno.models.openrouter import OpenRouter
 from agno.tools.mcp import MCPTools
+from openinference.instrumentation.agno import AgnoInstrumentor
+
+from build_metadata import git_revision
+from prompt_suite import load_prompt_suite
+
+# Must happen before instrument()/instrument_*() calls, or the hooks register with nowhere to
+# send data. Agno itself has no native Logfire instrumentor; per
+# https://pydantic.dev/docs/logfire/integrations/llms/agno/ it's instrumented via the
+# OpenInference OTel instrumentor, which picks up the tracer provider logfire.configure() sets.
+logfire.configure(
+    service_name="agno-test-mcp",
+    service_version=git_revision(),
+    environment=os.getenv("LOGFIRE_ENVIRONMENT", "local"),
+)
+AgnoInstrumentor().instrument()  # agent runs, model requests, tool calls, token usage
+logfire.instrument_mcp()  # client-side spans for calls to the osqueryi-mcp stdio server
 
 
-def setup_logging(log_file: str, debug_libs: tuple[str, ...]) -> None:
+QUIET_LIBS = ("httpcore", "hpack")  # frame-by-frame transport decode noise; not useful at DEBUG
+
+
+def setup_logging(log_file: str, debug_libs: tuple[str, ...], quiet_libs: tuple[str, ...] = ()) -> None:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(),
+            logfire.LogfireLoggingHandler(),  # forward existing stdlib log calls to Logfire too
+        ],
     )
     for handler in logging.root.handlers:
         if type(handler) is logging.StreamHandler:
             handler.setLevel(logging.INFO)
     for name in debug_libs:
         logging.getLogger(name).setLevel(logging.DEBUG)
+    # These inherit DEBUG from the root logger regardless of debug_libs, and the file/Logfire
+    # sinks aren't capped at INFO like the console is, so they flood both. httpx's own one-
+    # line-per-request logs are unaffected since they're on the "httpx" logger, not these.
+    for name in quiet_libs:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
-setup_logging("agno_test.log", ("agno", "mcp", "httpx"))
+setup_logging("agno_test.log", ("agno", "mcp", "httpx"), QUIET_LIBS)
 logger = logging.getLogger("agno_test")
 
 
@@ -42,6 +72,12 @@ PROVIDERS = [
         "Gemini",
     ),
     (("claude-",), ("ANTHROPIC_API_KEY",), lambda model_id: Claude(id=model_id), "Anthropic"),
+    (
+        ("deepseek/", "deepseek-", "openrouter/", "qwen/", "qwen-"),
+        ("OPENROUTER_API_KEY",),
+        lambda model_id: OpenRouter(id=model_id),
+        "OpenRouter",
+    ),
 ]
 
 
@@ -186,7 +222,19 @@ def log_run_start(run_input: Any, agent: Agent | None = None) -> None:
 
 
 def log_run_completion(run_output: Any) -> None:
-    logger.info(f"[Agent] Run finished | Tokens: {_format_metrics(getattr(run_output, 'metrics', None))}")
+    metrics = getattr(run_output, "metrics", None)
+    logger.info(f"[Agent] Run finished | Tokens: {_format_metrics(metrics)}")
+    # Structured, queryable counterpart to the log line above. AgnoInstrumentor already puts
+    # usage on the run span; this makes it easy to find/filter/alert on directly.
+    if metrics is not None:
+        logfire.info(
+            "Agent run finished",
+            input_tokens=int(getattr(metrics, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(metrics, "output_tokens", 0) or 0),
+            total_tokens=int(getattr(metrics, "total_tokens", 0) or 0),
+            cache_read_tokens=int(getattr(metrics, "cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(metrics, "cache_write_tokens", 0) or 0),
+        )
 
 
 async def telemetry_tool_hook(
@@ -198,14 +246,17 @@ async def telemetry_tool_hook(
     logger.info(f"  Args: {arguments}")
     start = time.perf_counter()
 
-    try:
-        result = function_call(**arguments)
-        if isawaitable(result):
-            result = await result
-    except Exception as exc:
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        logger.exception(f"[Tool Result] error after {elapsed_ms:.1f} ms: {exc}")
-        raise
+    # AgnoInstrumentor already spans tool calls; this manual span groups this hook's own
+    # log lines under it in the trace tree and captures exceptions with a real span status.
+    with logfire.span("tool call: {function_name}", function_name=function_name, arguments=arguments):
+        try:
+            result = function_call(**arguments)
+            if isawaitable(result):
+                result = await result
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.exception(f"[Tool Result] error after {elapsed_ms:.1f} ms: {exc}")
+            raise
 
     elapsed_ms = (time.perf_counter() - start) * 1000
     logger.info(f"[Tool Result] duration={elapsed_ms:.1f} ms")
@@ -250,38 +301,6 @@ def log_event_summary(events: list[Any] | None) -> None:
     )
 
 
-TASKS = [
-    (
-        "Structured discovery",
-        """
-        Use the osquery MCP tools to identify account-related tables and compare the new helpers with the legacy flow.
-        1. Use search_tables for "user" and also search_columns=true for "uid".
-        2. Preview the most relevant tables.
-        3. Finish with a short recommendation on which tool sequence is best for fast discovery.
-        """,
-    ),
-    (
-        "Single-table investigation",
-        """
-        Investigate currently running processes using the structured helpers.
-        1. Preview the processes table.
-        2. Use query_table to return 5 on-disk processes with pid, name, path, uid, and start_time ordered by pid.
-        3. Summarize why query_table is safer or faster than using raw SQL for this case.
-        """,
-    ),
-    (
-        "Join-heavy query",
-        """
-        Perform a more complex osquery investigation.
-        1. Use run_query to join processes to users on uid.
-        2. Return 5 rows with pid, process name, path, and owning username for on-disk processes.
-        3. Then query listening_ports joined to processes and summarize any open listeners you find.
-        Keep the final answer compact but include which MCP tools were used.
-        """,
-    ),
-]
-
-
 async def run_agno_mcp(model_id: str):
     server_path = shutil.which("osqueryi-mcp")
     os.environ.setdefault("OSQUERYI_LOCKFILE", "off")
@@ -299,18 +318,21 @@ async def run_agno_mcp(model_id: str):
     if model is None:
         raise RuntimeError(f"could not configure model: {model_id}")
 
+    system_prompt, tasks = load_prompt_suite()
+
     stats = RunStats()
 
-    async with MCPTools(command=server_path, transport="stdio") as mcp_tools:
+    # Without an explicit env, MCPTools spawns the subprocess with only
+    # HOME/LOGNAME/PATH/SHELL/TERM/USER inherited (mcp SDK's get_default_environment()) —
+    # silently dropping OSQUERYI_LOCKFILE/OSQUERYI_LOGFILE above and any OTEL_EXPORTER_OTLP_*
+    # the server's own telemetry needs. Pass the full parent env through explicitly.
+    # (Unlike pydantic_ai's StdioTransport, MCPTools.__aexit__ has no keep_alive escape hatch —
+    # it always closes the connection, so the child already gets a graceful shutdown here.)
+    async with MCPTools(command=server_path, env=dict(os.environ), transport="stdio") as mcp_tools:
         agent = Agent(
             model=model,
             tools=[mcp_tools],
-            instructions="""
-            You are an osquery expert. Use the available MCP tools to query system information.
-            Prefer search_tables, preview_table, and query_table for discovery and single-table work.
-            Use run_query when joins or more complex SQL are needed.
-            Be explicit about which tools you used and why.
-            """,
+            instructions=system_prompt,
             tool_hooks=[telemetry_tool_hook],
             pre_hooks=[log_run_start],
             post_hooks=[log_run_completion],
@@ -319,27 +341,47 @@ async def run_agno_mcp(model_id: str):
             markdown=False,
         )
 
-        for title, prompt in TASKS:
-            stats.reset_task()
-            start = time.perf_counter()
-            logger.info("\n" + "=" * 20)
-            logger.info(f" TASK: {title}")
-            logger.info("=" * 20)
+        for task in tasks:
+            title, prompt = task.title, task.prompt
+            with logfire.span("task: {title}", title=title):
+                stats.reset_task()
+                start = time.perf_counter()
+                logger.info("\n" + "=" * 20)
+                logger.info(f" TASK: {title}")
+                logger.info("=" * 20)
 
-            response = await agent.arun(prompt)
-            stats.update(response)
+                response = await agent.arun(prompt)
+                stats.update(response)
 
-            logger.info("\n[Final Answer]")
-            logger.info(response.content)
-            log_model_messages(getattr(response, "messages", None))
-            log_tool_summary(getattr(response, "tools", None))
-            log_event_summary(getattr(response, "events", None))
-            logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
+                logger.info("\n[Final Answer]")
+                logger.info(response.content)
+                log_model_messages(getattr(response, "messages", None))
+                log_tool_summary(getattr(response, "tools", None))
+                log_event_summary(getattr(response, "events", None))
+                logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
 
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.info(f"\n[elapsed: {elapsed_ms:.1f} ms]")
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                logger.info(f"\n[elapsed: {elapsed_ms:.1f} ms]")
+
+                logfire.info(
+                    "Task completed: {title}",
+                    title=title,
+                    elapsed_ms=elapsed_ms,
+                    input_tokens=stats.task_tokens.input_tokens,
+                    output_tokens=stats.task_tokens.output_tokens,
+                    total_tokens=stats.task_tokens.total_tokens,
+                    cache_read_tokens=stats.task_tokens.cache_read_tokens,
+                )
 
         logger.info(f"\n[Overall Token Totals] {stats.overall_tokens.summary()}")
+        logfire.info(
+            "All tasks completed",
+            task_count=len(tasks),
+            input_tokens=stats.overall_tokens.input_tokens,
+            output_tokens=stats.overall_tokens.output_tokens,
+            total_tokens=stats.overall_tokens.total_tokens,
+            cache_read_tokens=stats.overall_tokens.cache_read_tokens,
+        )
 
 if __name__ == "__main__":
     default_model = "gemini-3.1-flash-lite-preview"

@@ -49,7 +49,7 @@ func initTelemetry(ctx context.Context) (*Telemetry, error) {
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
 		"",
 		semconv.ServiceName(serviceName),
-		semconv.ServiceVersion(Version),
+		semconv.ServiceVersion(CommitHash),
 		attribute.String("vcs.revision", CommitHash),
 	))
 	if err != nil {

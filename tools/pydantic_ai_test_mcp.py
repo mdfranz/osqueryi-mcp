@@ -7,18 +7,38 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import logfire
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities.hooks import Hooks
 from pydantic_ai.mcp import MCPToolset, StdioTransport
 from pydantic_ai.models import ModelRequestContext, ModelResponse
 
+from build_metadata import git_revision
+from prompt_suite import load_prompt_suite
 
-def setup_logging(log_file: str, debug_libs: tuple[str, ...]) -> None:
+# Must happen before instrument_*() calls, or the hooks register with nowhere to send data.
+logfire.configure(
+    service_name="pydantic-ai-test-mcp",
+    service_version=git_revision(),
+    environment=os.getenv("LOGFIRE_ENVIRONMENT", "local"),
+)
+logfire.instrument_pydantic_ai()  # agent runs, model requests, tool calls, token usage
+logfire.instrument_mcp()  # client-side spans for calls to the osqueryi-mcp stdio server
+
+
+QUIET_LIBS = ("httpcore", "hpack")  # frame-by-frame transport decode noise; not useful at DEBUG
+
+
+def setup_logging(log_file: str, debug_libs: tuple[str, ...], quiet_libs: tuple[str, ...] = ()) -> None:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(),
+            logfire.LogfireLoggingHandler(),  # forward existing stdlib log calls to Logfire too
+        ],
     )
     # Console at INFO; file stays at DEBUG. `type(h) is` (not isinstance) avoids matching FileHandler.
     for h in logging.root.handlers:
@@ -26,9 +46,14 @@ def setup_logging(log_file: str, debug_libs: tuple[str, ...]) -> None:
             h.setLevel(logging.INFO)
     for name in debug_libs:
         logging.getLogger(name).setLevel(logging.DEBUG)
+    # These inherit DEBUG from the root logger regardless of debug_libs, and the file/Logfire
+    # sinks aren't capped at INFO like the console is, so they flood both. httpx's own one-
+    # line-per-request logs are unaffected since they're on the "httpx" logger, not these.
+    for name in quiet_libs:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
-setup_logging("pydantic_ai_test.log", ("mcp", "httpx", "pydantic_ai"))
+setup_logging("pydantic_ai_test.log", ("mcp", "httpx", "pydantic_ai"), QUIET_LIBS)
 logger = logging.getLogger("pydantic_ai_test")
 
 
@@ -109,49 +134,6 @@ class RunStats:
         self.overall_tokens.add(usage)
 
 
-TASKS = [
-    (
-        "Structured discovery",
-        """
-        Use the osquery MCP tools to find account-related tables efficiently.
-        Prefer search_tables first, then preview_table for the best candidates, and explain whether the helper tools reduce round trips compared with list_tables + describe_table.
-        """,
-    ),
-    (
-        "Single-table query",
-        """
-        Investigate processes using the structured helpers.
-        Preview the processes table, then use query_table to return 5 on-disk processes with pid, name, path, uid, and start_time ordered by pid.
-        End with a short note on why query_table is a better fit than raw SQL here.
-        """,
-    ),
-    (
-        "Join-heavy workload",
-        """
-        Run a more complex osquery investigation.
-        Use run_query to join processes to users on uid and return 5 rows with pid, process name, path, and username for on-disk processes.
-        Then inspect listening_ports joined to processes and summarize any listeners you find.
-        Mention which tools you used.
-        """,
-    ),
-]
-
-
-SYSTEM_PROMPT = """
-You are an osquery expert. Use the available MCP tools to query system information.
-Prefer search_tables, preview_table, and query_table for discovery and single-table work.
-Use run_query for joins and more complex SQL.
-
-CRITICAL: After using tools, always provide a detailed final answer that includes:
-1. Summary of what you discovered or found
-2. Which specific tools you used and why each one
-3. Key findings from the data (include sample rows if relevant)
-4. Your analysis and conclusions
-
-Do not respond with blank or minimal text. Provide comprehensive explanations.
-"""
-
-
 async def run_pydantic_ai_mcp(requested_model: str):
     server_path = shutil.which("osqueryi-mcp")
     os.environ.setdefault("OSQUERYI_LOCKFILE", "off")
@@ -165,6 +147,7 @@ async def run_pydantic_ai_mcp(requested_model: str):
         raise RuntimeError(f"could not configure model: {requested_model}")
 
     logger.info(f"Using model: {model_name}")
+    system_prompt, tasks = load_prompt_suite()
 
     hooks = Hooks()
 
@@ -181,38 +164,84 @@ async def run_pydantic_ai_mcp(requested_model: str):
             f"input={usage.input_tokens}, output={usage.output_tokens}, "
             f"total={_total_tokens(usage)}, cache_read={usage.cache_read_tokens}"
         )
+        # Structured, queryable counterpart to the log line above. instrument_pydantic_ai()
+        # already puts usage on the model-request span; this makes per-turn usage easy to
+        # find/filter/alert on directly without digging into span attributes.
+        logfire.info(
+            "Model turn finished: {model_name}",
+            model_name=response.model_name,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=_total_tokens(usage),
+            cache_read_tokens=usage.cache_read_tokens,
+        )
         return response
 
     stats = RunStats()
 
-    async with MCPToolset(StdioTransport(server_path, args=[])) as server:
+    # Without an explicit env, the mcp SDK spawns the subprocess with only
+    # HOME/LOGNAME/PATH/SHELL/TERM/USER inherited (a safety default) — silently dropping
+    # OSQUERYI_LOCKFILE/OSQUERYI_LOGFILE above and any OTEL_EXPORTER_OTLP_* the server's own
+    # telemetry needs. Pass the full parent env through explicitly, like the other two scripts.
+    #
+    # keep_alive defaults to True (subprocess survives __aexit__, for reuse across multiple
+    # `async with` blocks). Since this script enters the toolset exactly once, that just means
+    # the child never gets a graceful stdin-close: it's left running until something outside
+    # Python kills it, which bypasses the Go server's deferred cleanup — including its
+    # telemetry.Shutdown() that flushes buffered spans/logs/metrics. Traces/logs mostly survive
+    # anyway because their batch processors flush periodically during the run, but the metrics
+    # PeriodicReader's default 60s interval means short runs lose everything. keep_alive=False
+    # makes __aexit__ actually call disconnect(), so the child sees a clean EOF and its own
+    # graceful-shutdown path (and telemetry flush) gets to run.
+    transport = StdioTransport(server_path, args=[], env=dict(os.environ), keep_alive=False)
+    async with MCPToolset(transport) as server:
         agent = Agent(
             model_name,
             toolsets=[server],
             capabilities=[hooks],
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
         )
 
         try:
-            for title, prompt in TASKS:
-                stats.reset_task()
-                start = time.perf_counter()
-                logger.info("\n" + "=" * 20)
-                logger.info(f" TASK: {title}")
-                logger.info("=" * 20)
+            for task in tasks:
+                title, prompt = task.title, task.prompt
+                with logfire.span("task: {title}", title=title):
+                    stats.reset_task()
+                    start = time.perf_counter()
+                    logger.info("\n" + "=" * 20)
+                    logger.info(f" TASK: {title}")
+                    logger.info("=" * 20)
 
-                result = await agent.run(prompt)
+                    result = await agent.run(prompt)
 
-                logger.info("\n[Final Answer]")
-                logger.info(result.output)
+                    logger.info("\n[Final Answer]")
+                    logger.info(result.output)
 
-                stats.update(result.usage)
+                    stats.update(result.usage)
 
-                logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                logger.info(f"\n[elapsed: {elapsed_ms:.1f} ms]")
+                    logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    logger.info(f"\n[elapsed: {elapsed_ms:.1f} ms]")
+
+                    logfire.info(
+                        "Task completed: {title}",
+                        title=title,
+                        elapsed_ms=elapsed_ms,
+                        input_tokens=stats.task_tokens.input_tokens,
+                        output_tokens=stats.task_tokens.output_tokens,
+                        total_tokens=stats.task_tokens.total_tokens,
+                        cache_read_tokens=stats.task_tokens.cache_read_tokens,
+                    )
 
             logger.info(f"\n[Overall Token Totals] {stats.overall_tokens.summary()}")
+            logfire.info(
+                "All tasks completed",
+                task_count=len(tasks),
+                input_tokens=stats.overall_tokens.input_tokens,
+                output_tokens=stats.overall_tokens.output_tokens,
+                total_tokens=stats.overall_tokens.total_tokens,
+                cache_read_tokens=stats.overall_tokens.cache_read_tokens,
+            )
 
         except Exception as e:
             logger.exception(f"An error occurred during agent execution: {e}")
