@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "osqueryi-mcp": {
+      "command": "./osqueryi-mcp",
+      "env": {
+        "OSQUERYI_DEBUG": "true"
+      }
+    }
+  }
+}
