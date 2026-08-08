@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 var CommitHash = "dev"
@@ -100,7 +102,7 @@ func acquireLock(lockFile string) (func(), error) {
 	}, nil
 }
 
-func setupLogging(cfg Config) *slog.Logger {
+func setupLogging(cfg Config, telemetry *Telemetry) *slog.Logger {
 	var w io.Writer = os.Stderr
 	if cfg.LogFile != "" && cfg.LogFile != "off" {
 		f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -114,7 +116,11 @@ func setupLogging(cfg Config) *slog.Logger {
 		level = slog.LevelDebug
 	}
 
-	handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
+	var handler slog.Handler = slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
+	if telemetryHandler := telemetry.slogHandler(); telemetryHandler != nil {
+		telemetry.setErrorLogger(slog.New(handler))
+		handler = multiHandler{handler, telemetryHandler}
+	}
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 	return logger
@@ -131,7 +137,18 @@ func main() {
 	}
 
 	cfg := loadConfig()
-	logger := setupLogging(cfg)
+	telemetry, telemetryErr := initTelemetry(context.Background())
+	logger := setupLogging(cfg, telemetry)
+	if telemetryErr != nil {
+		logger.Warn("telemetry initialization failed; continuing without Logfire export", "error_type", "initialization_failed")
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("telemetry shutdown failed", "error_type", "shutdown_failed")
+		}
+	}()
 
 	// Validate binary
 	path, err := exec.LookPath(cfg.BinaryPath)
@@ -171,12 +188,17 @@ func main() {
 	go func() {
 		warmCtx, cancel := context.WithTimeout(context.Background(), cfg.Timeout*2)
 		defer cancel()
+		warmCtx, span := otel.Tracer(instrumentationName).Start(warmCtx, "osqueryi.cache.warm")
+		defer span.End()
 
 		// If we already have all schemas (e.g. from disk cache), this will be a no-op
 		if err := executor.ensureAllSchemas(warmCtx); err != nil {
-			logger.Warn("failed to warm cache", "error", err)
+			span.SetStatus(codes.Error, errorType(warmCtx, err))
+			recordCacheOperation(warmCtx, "warm", "error")
+			logger.WarnContext(warmCtx, "failed to warm cache", "error", err, "error_type", errorType(warmCtx, err))
 		} else {
-			logger.Info("cache warmed")
+			recordCacheOperation(warmCtx, "warm", "ok")
+			logger.InfoContext(warmCtx, "cache warmed", "outcome", "ok")
 		}
 	}()
 

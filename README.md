@@ -57,6 +57,28 @@ The server is configured via environment variables:
 | `OSQUERYI_CACHEFILE` | `osqueryi-mcp-cache.json` | Path to the schema cache file. Set to `off` to disable. |
 | `OSQUERYI_DEBUG` | (unset) | Set to any value to enable debug-level logging. |
 | `OSQUERYI_LOGFILE` | `osqueryi-mcp.log` | Path to a file for logging. Set to `off` or use an empty string to log to stderr. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | Enables OpenTelemetry export when set together with `OTEL_EXPORTER_OTLP_HEADERS`. Use `https://logfire-us.pydantic.dev` for Logfire US or `https://logfire-eu.pydantic.dev` for EU. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | (unset) | OTLP request headers. For Logfire: `Authorization=<write token>`. Keep the token out of source control. |
+| `OTEL_SERVICE_NAME` | `osqueryi-mcp` | Optional service name shown in Logfire. |
+
+### Logfire observability
+
+Logfire export is disabled by default. To enable it, create a Logfire project
+and write token, then configure standard OpenTelemetry variables in the MCP
+client environment:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://logfire-us.pydantic.dev
+export OTEL_EXPORTER_OTLP_HEADERS='Authorization=your-write-token'
+export OTEL_SERVICE_NAME=osqueryi-mcp
+```
+
+The server exports tool, `osqueryi` subprocess, and cache spans; aggregate
+latency/count/response-size metrics; and sanitized structured logs. It does
+not export SQL, table names, filters, result data, cache paths, or raw osquery
+errors. Existing detailed `slog` output remains local. If telemetry cannot be
+initialized or exported, the MCP continues serving requests and logs a local
+warning instead.
 
 ## Caching
 

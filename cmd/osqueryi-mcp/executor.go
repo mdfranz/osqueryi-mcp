@@ -13,6 +13,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Executor struct {
@@ -41,7 +46,7 @@ func NewExecutor(binaryPath string, timeout time.Duration, cacheFile string) *Ex
 	}
 
 	if cacheFile != "" && cacheFile != "off" {
-		if err := e.loadCache(); err != nil {
+		if err := e.loadCache(context.Background()); err != nil {
 			if os.IsNotExist(err) {
 				slog.Info("cache file not found, will create on exit or after warming", "file", cacheFile)
 			} else {
@@ -55,14 +60,21 @@ func NewExecutor(binaryPath string, timeout time.Duration, cacheFile string) *Ex
 	return e
 }
 
-func (e *Executor) loadCache() error {
+func (e *Executor) loadCache(ctx context.Context) error {
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.cache.load")
+	defer span.End()
+
 	data, err := os.ReadFile(e.cacheFile)
 	if err != nil {
+		span.SetStatus(codes.Error, errorType(ctx, err))
+		recordCacheOperation(ctx, "load", "error")
 		return err
 	}
 
 	var pc PersistedCache
 	if err := json.Unmarshal(data, &pc); err != nil {
+		span.SetStatus(codes.Error, "decode_failed")
+		recordCacheOperation(ctx, "load", "error")
 		return err
 	}
 
@@ -71,15 +83,19 @@ func (e *Executor) loadCache() error {
 	e.tables = pc.Tables
 	e.schemas = pc.Schemas
 	e.allSchemasFetched = pc.AllSchemasFetched
+	span.SetAttributes(attribute.Int("cache.tables", len(pc.Tables)))
+	recordCacheOperation(ctx, "load", "ok")
 	return nil
 }
 
-func (e *Executor) saveCache() error {
+func (e *Executor) saveCache(ctx context.Context) error {
 	if e.cacheFile == "" || e.cacheFile == "off" {
 		return nil
 	}
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.cache.save")
+	defer span.End()
 
-	slog.Info("saving cache to disk", "file", e.cacheFile)
+	slog.InfoContext(ctx, "saving cache to disk", "file", e.cacheFile)
 
 	e.mu.RLock()
 	pc := PersistedCache{
@@ -91,15 +107,21 @@ func (e *Executor) saveCache() error {
 
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
-		slog.Error("failed to marshal cache", "error", err)
+		span.SetStatus(codes.Error, "encode_failed")
+		recordCacheOperation(ctx, "save", "error")
+		slog.ErrorContext(ctx, "failed to marshal cache", "error", err, "error_type", "encode_failed")
 		return err
 	}
 
 	err = os.WriteFile(e.cacheFile, data, 0644)
 	if err != nil {
-		slog.Error("failed to write cache file", "file", e.cacheFile, "error", err)
+		span.SetStatus(codes.Error, errorType(ctx, err))
+		recordCacheOperation(ctx, "save", "error")
+		slog.ErrorContext(ctx, "failed to write cache file", "file", e.cacheFile, "error", err, "error_type", errorType(ctx, err))
 	} else {
-		slog.Info("saved cache to disk", "file", e.cacheFile, "tables", len(pc.Tables))
+		span.SetAttributes(attribute.Int("cache.tables", len(pc.Tables)), attribute.Int("osquery.output.bytes", len(data)))
+		recordCacheOperation(ctx, "save", "ok")
+		slog.InfoContext(ctx, "saved cache to disk", "file", e.cacheFile, "tables", len(pc.Tables), "outcome", "ok")
 	}
 	return err
 }
@@ -120,10 +142,12 @@ type SearchMatch struct {
 }
 
 func (e *Executor) runSQL(ctx context.Context, sql string) ([]byte, error) {
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.execute")
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	slog.Debug("executing_sql", "sql", sql)
+	slog.DebugContext(ctx, "executing_sql", "sql", sql)
 	cmd := exec.CommandContext(ctx, e.binaryPath, "--json", "--config_path=/dev/null", sql)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -134,16 +158,21 @@ func (e *Executor) runSQL(ctx context.Context, sql string) ([]byte, error) {
 	duration := time.Since(start)
 
 	if err != nil {
+		outcome := errorType(ctx, err)
+		span.SetStatus(codes.Error, outcome)
+		recordOSQueryMetrics(ctx, duration, outcome)
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
-			slog.Debug("exec_failed", "sql", sql, "error", err, "duration_ms", duration.Milliseconds())
+			slog.DebugContext(ctx, "exec_failed", "sql", sql, "error", err, "error_type", outcome, "duration_ms", duration.Milliseconds())
 			return nil, err
 		}
-		slog.Debug("exec_failed", "sql", sql, "error", errMsg, "duration_ms", duration.Milliseconds())
+		slog.DebugContext(ctx, "exec_failed", "sql", sql, "error", errMsg, "error_type", outcome, "duration_ms", duration.Milliseconds())
 		return nil, fmt.Errorf("%s", errMsg)
 	}
 
-	slog.Debug("exec_completed", "sql", sql, "duration_ms", duration.Milliseconds(), "bytes", stdout.Len())
+	span.SetAttributes(attribute.Int("osquery.output.bytes", stdout.Len()), attribute.String("outcome", "ok"))
+	recordOSQueryMetrics(ctx, duration, "ok")
+	slog.DebugContext(ctx, "exec_completed", "sql", sql, "duration_ms", duration.Milliseconds(), "bytes", stdout.Len(), "outcome", "ok")
 	return stdout.Bytes(), nil
 }
 
@@ -152,11 +181,13 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	if len(e.tables) > 0 {
 		tables := append([]string(nil), e.tables...)
 		e.mu.RUnlock()
+		trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", true))
 		return tables, nil
 	}
 	e.mu.RUnlock()
 
-	slog.Debug("listing_tables")
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", false))
+	slog.DebugContext(ctx, "listing_tables")
 	data, err := e.runSQL(ctx, "SELECT name FROM osquery_registry WHERE registry = 'table' ORDER BY name;")
 	if err != nil {
 		return nil, err
@@ -178,7 +209,7 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	if len(e.tables) == 0 {
 		e.tables = append([]string(nil), tables...)
 		e.mu.Unlock()
-		_ = e.saveCache()
+		_ = e.saveCache(ctx)
 	} else {
 		e.mu.Unlock()
 	}
@@ -187,7 +218,7 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 }
 
 func (e *Executor) fetchAllSchemas(ctx context.Context) error {
-	slog.Debug("fetching_all_schemas")
+	slog.DebugContext(ctx, "fetching_all_schemas")
 	query := "SELECT m.name as table_name, p.* FROM (SELECT name FROM osquery_registry WHERE registry = 'table') m, pragma_table_info(m.name) p;"
 	data, err := e.runSQL(ctx, query)
 	if err != nil {
@@ -225,7 +256,7 @@ func (e *Executor) fetchAllSchemas(ctx context.Context) error {
 	e.allSchemasFetched = true
 	e.mu.Unlock()
 
-	return e.saveCache()
+	return e.saveCache(ctx)
 }
 
 func (e *Executor) ensureAllSchemas(ctx context.Context) error {
@@ -251,6 +282,8 @@ func (e *Executor) ensureAllSchemas(ctx context.Context) error {
 }
 
 func (e *Executor) RefreshCache(ctx context.Context) error {
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.cache.refresh")
+	defer span.End()
 	e.warmMu.Lock()
 	defer e.warmMu.Unlock()
 
@@ -260,7 +293,14 @@ func (e *Executor) RefreshCache(ctx context.Context) error {
 	e.allSchemasFetched = false
 	e.mu.Unlock()
 
-	return e.fetchAllSchemas(ctx)
+	err := e.fetchAllSchemas(ctx)
+	if err != nil {
+		span.SetStatus(codes.Error, errorType(ctx, err))
+		recordCacheOperation(ctx, "refresh", "error")
+		return err
+	}
+	recordCacheOperation(ctx, "refresh", "ok")
+	return nil
 }
 
 var tableNameRegex = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -300,9 +340,11 @@ func (e *Executor) describeTableColumns(ctx context.Context, tableName string) (
 	if columns, ok := e.schemas[tableName]; ok {
 		cached := append([]TableColumn(nil), columns...)
 		e.mu.RUnlock()
+		trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", true))
 		return cached, nil
 	}
 	e.mu.RUnlock()
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", false))
 
 	query := fmt.Sprintf("PRAGMA table_info(%s);", tableName)
 	data, err := e.runSQL(ctx, query)
@@ -319,7 +361,7 @@ func (e *Executor) describeTableColumns(ctx context.Context, tableName string) (
 	if _, ok := e.schemas[tableName]; !ok {
 		e.schemas[tableName] = append([]TableColumn(nil), columns...)
 		e.mu.Unlock()
-		_ = e.saveCache()
+		_ = e.saveCache(ctx)
 	} else {
 		e.mu.Unlock()
 	}

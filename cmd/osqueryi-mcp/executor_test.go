@@ -96,7 +96,7 @@ func TestCacheRoundTrip(t *testing.T) {
 		"users": {{Name: "username", Type: "TEXT"}},
 	}
 	e.allSchemasFetched = true
-	if err := e.saveCache(); err != nil {
+	if err := e.saveCache(context.Background()); err != nil {
 		t.Fatalf("save cache: %v", err)
 	}
 
