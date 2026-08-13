@@ -601,10 +601,76 @@ func (e *Executor) DescribeTable(ctx context.Context, tableName string) ([]byte,
 	return json.Marshal(columns)
 }
 
+var (
+	noSuchColumnRegex = regexp.MustCompile(`no such column: [A-Za-z_][A-Za-z0-9_.]*`)
+	noSuchTableRegex  = regexp.MustCompile(`no such table: ([A-Za-z_][A-Za-z0-9_]*)`)
+	sqlTableRefRegex  = regexp.MustCompile(`(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*)`)
+)
+
+// maxAnnotatedTables bounds how many schemas get appended to a failing query, so a wide join
+// cannot turn one error into a larger payload than the result would have been.
+const maxAnnotatedTables = 5
+
+func referencedTables(sql string) []string {
+	var tables []string
+	seen := make(map[string]struct{})
+	for _, match := range sqlTableRefRegex.FindAllStringSubmatch(sql, -1) {
+		table := match[1]
+		if _, ok := seen[table]; ok {
+			continue
+		}
+		seen[table] = struct{}{}
+		tables = append(tables, table)
+		if len(tables) == maxAnnotatedTables {
+			break
+		}
+	}
+	return tables
+}
+
+// osqueryi reports only "no such column: x" / "no such table: y", which costs a model an extra
+// describe_table turn before it can retry. Attach the same context the query_table validation
+// errors carry. Best-effort: any lookup failure leaves the original error untouched.
+func (e *Executor) annotateQueryError(ctx context.Context, sql string, queryErr error) error {
+	message := queryErr.Error()
+
+	if match := noSuchTableRegex.FindStringSubmatch(message); match != nil {
+		tables, err := e.listTables(ctx)
+		if err != nil {
+			return queryErr
+		}
+		if suggestions := similarTables(match[1], tables); len(suggestions) > 0 {
+			return fmt.Errorf("%s\ndid you mean: %s", message, strings.Join(suggestions, ", "))
+		}
+		return fmt.Errorf("%s\nno similar table exists; use search_tables to find one", message)
+	}
+
+	if noSuchColumnRegex.MatchString(message) {
+		var schemas strings.Builder
+		for _, table := range referencedTables(sql) {
+			schema, err := e.describeTableColumns(ctx, table)
+			if err != nil {
+				// osqueryi reports a missing table as a column error, so the real problem is
+				// often the table name. ensureKnownTable's message already carries suggestions.
+				if strings.HasPrefix(err.Error(), "unknown table:") {
+					fmt.Fprintf(&schemas, "\n%s", err.Error())
+				}
+				continue
+			}
+			fmt.Fprintf(&schemas, "\ncolumns in %s: %s", table, strings.Join(columnNames(schema), ", "))
+		}
+		if schemas.Len() > 0 {
+			return fmt.Errorf("%s%s", message, schemas.String())
+		}
+	}
+
+	return queryErr
+}
+
 func (e *Executor) RunQuery(ctx context.Context, sql string) ([]byte, error) {
 	data, err := e.runSQL(ctx, sql)
 	if err != nil {
-		return nil, err
+		return nil, e.annotateQueryError(ctx, sql, err)
 	}
 	return e.truncateJSON(data)
 }

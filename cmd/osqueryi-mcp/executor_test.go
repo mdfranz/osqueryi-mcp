@@ -29,6 +29,18 @@ case "$3" in
     printf '%s\n' 'invalid SQL' >&2
     exit 1
     ;;
+  *"SELECT bogus FROM users"*)
+    printf '%s\n' 'Error: no such column: bogus' >&2
+    exit 1
+    ;;
+  *"FROM userss"*)
+    printf '%s\n' 'Error: no such table: userss' >&2
+    exit 1
+    ;;
+  *"FROM missingtbl"*)
+    printf '%s\n' 'Error: no such column: name' >&2
+    exit 1
+    ;;
   *)
     printf '%s\n' '[]'
     ;;
@@ -115,6 +127,50 @@ func TestSimilarTables(t *testing.T) {
 	}
 	if got := similarTables("signed_system_files", tables); len(got) != 0 {
 		t.Errorf("similarTables with no near miss = %v, want none", got)
+	}
+}
+
+func TestRunQueryErrorAnnotation(t *testing.T) {
+	e := NewExecutor(writeFakeOSQuery(t), time.Second, "off")
+	ctx := context.Background()
+
+	_, err := e.RunQuery(ctx, "SELECT bogus FROM users LIMIT 1")
+	if err == nil {
+		t.Fatal("bad column query succeeded")
+	}
+	if !strings.Contains(err.Error(), "columns in users: username, uid") {
+		t.Errorf("no such column error omits the table schema: %v", err)
+	}
+
+	_, err = e.RunQuery(ctx, "SELECT uid FROM userss LIMIT 1")
+	if err == nil {
+		t.Fatal("bad table query succeeded")
+	}
+	if !strings.Contains(err.Error(), "did you mean: users") {
+		t.Errorf("no such table error omits suggestions: %v", err)
+	}
+
+	// osqueryi reports a missing table as a column error, so this path has to surface the
+	// table problem rather than silently skipping the unknown table.
+	_, err = e.RunQuery(ctx, "SELECT name FROM missingtbl LIMIT 1")
+	if err == nil {
+		t.Fatal("query against missing table succeeded")
+	}
+	if !strings.Contains(err.Error(), "unknown table: missingtbl") {
+		t.Errorf("column error on a missing table omits the table problem: %v", err)
+	}
+
+	// Errors that name neither a column nor a table pass through unchanged.
+	_, err = e.RunQuery(ctx, "bad query")
+	if err == nil || err.Error() != "invalid SQL" {
+		t.Errorf("unrelated error was rewritten: %v", err)
+	}
+}
+
+func TestReferencedTables(t *testing.T) {
+	sql := "SELECT p.pid, u.username FROM processes p JOIN users u ON p.uid = u.uid JOIN processes q ON 1=1"
+	if got, want := referencedTables(sql), []string{"processes", "users"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("referencedTables = %v, want %v", got, want)
 	}
 }
 
