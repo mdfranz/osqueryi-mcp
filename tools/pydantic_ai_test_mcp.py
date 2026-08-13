@@ -10,6 +10,7 @@ from typing import Any
 import logfire
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities.hooks import Hooks
+from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.mcp import MCPToolset, StdioTransport
 from pydantic_ai.models import ModelRequestContext, ModelResponse
 
@@ -207,6 +208,8 @@ async def run_pydantic_ai_mcp(requested_model: str):
             retries=3,
         )
 
+        failed_tasks: list[str] = []
+
         try:
             for task in tasks:
                 title, prompt = task.title, task.prompt
@@ -217,7 +220,24 @@ async def run_pydantic_ai_mcp(requested_model: str):
                     logger.info(f" TASK: {title}")
                     logger.info("=" * 20)
 
-                    result = await agent.run(prompt)
+                    # A run that exhausts tool retries or a usage limit is a result about the
+                    # model, not a reason to abandon the suite: without this, one bad task
+                    # discards every task after it (in practice the last task killed 3 of 4
+                    # runs, taking the overall totals with it).
+                    try:
+                        result = await agent.run(prompt)
+                    except AgentRunError as e:
+                        elapsed_ms = (time.perf_counter() - start) * 1000
+                        failed_tasks.append(title)
+                        logger.error(f"[TASK FAILED] {title}: {e}")
+                        logfire.error(
+                            "Task failed: {title}",
+                            title=title,
+                            error=str(e),
+                            error_type=type(e).__name__,
+                            elapsed_ms=elapsed_ms,
+                        )
+                        continue
 
                     logger.info("\n[Final Answer]")
                     logger.info(result.output)
@@ -239,9 +259,15 @@ async def run_pydantic_ai_mcp(requested_model: str):
                     )
 
             logger.info(f"\n[Overall Token Totals] {stats.overall_tokens.summary()}")
+            if failed_tasks:
+                logger.warning(
+                    f"[Failed Tasks] {len(failed_tasks)}/{len(tasks)}: {', '.join(failed_tasks)}"
+                )
             logfire.info(
                 "All tasks completed",
                 task_count=len(tasks),
+                failed_task_count=len(failed_tasks),
+                failed_tasks=failed_tasks,
                 input_tokens=stats.overall_tokens.input_tokens,
                 output_tokens=stats.overall_tokens.output_tokens,
                 total_tokens=stats.overall_tokens.total_tokens,
