@@ -453,12 +453,36 @@ func columnNames(columns []TableColumn) []string {
 	return names
 }
 
+// maxColumnListChars keeps an error from growing past the point of usefulness. Results are
+// capped by truncateJSON; errors are not, and a wide join can name five tables at once.
+const maxColumnListChars = 600
+
+func formatColumnList(schema []TableColumn) string {
+	names := columnNames(schema)
+	joined := strings.Join(names, ", ")
+	if len(joined) <= maxColumnListChars {
+		return joined
+	}
+
+	kept := 0
+	length := 0
+	for _, name := range names {
+		next := length + len(name) + 2 // ", "
+		if next > maxColumnListChars {
+			break
+		}
+		length = next
+		kept++
+	}
+	return fmt.Sprintf("%s, ... (%d more, use describe_table)", strings.Join(names[:kept], ", "), len(names)-kept)
+}
+
 // Models routinely guess column names and, without the valid set in the error, burn a whole
 // extra round trip on describe_table before retrying. Naming the alternatives lets them fix
 // the call from the error alone.
 func unknownColumnError(kind, column string, schema []TableColumn) error {
 	return fmt.Errorf("unknown %s: %s\nvalid columns for this table: %s",
-		kind, column, strings.Join(columnNames(schema), ", "))
+		kind, column, formatColumnList(schema))
 }
 
 func validateSelectedColumns(selected []string, schema []TableColumn) ([]string, error) {
@@ -605,6 +629,9 @@ var (
 	noSuchColumnRegex = regexp.MustCompile(`no such column: [A-Za-z_][A-Za-z0-9_.]*`)
 	noSuchTableRegex  = regexp.MustCompile(`no such table: ([A-Za-z_][A-Za-z0-9_]*)`)
 	sqlTableRefRegex  = regexp.MustCompile(`(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*)`)
+	// A CTE is the only place an identifier is followed by "AS (" — a column alias ("as ts")
+	// has no parenthesis, and a derived-table alias follows the closing one.
+	sqlCTENameRegex = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_]*)\s+as\s*\(`)
 )
 
 // maxAnnotatedTables bounds how many schemas get appended to a failing query, so a wide join
@@ -613,9 +640,19 @@ const maxAnnotatedTables = 5
 
 func referencedTables(sql string) []string {
 	var tables []string
+	// "WITH recent AS (...) SELECT * FROM recent" otherwise reports "unknown table: recent",
+	// sending the model after a table that was never missing.
+	ctes := make(map[string]struct{})
+	for _, match := range sqlCTENameRegex.FindAllStringSubmatch(sql, -1) {
+		ctes[strings.ToLower(match[1])] = struct{}{}
+	}
+
 	seen := make(map[string]struct{})
 	for _, match := range sqlTableRefRegex.FindAllStringSubmatch(sql, -1) {
 		table := match[1]
+		if _, isCTE := ctes[strings.ToLower(table)]; isCTE {
+			continue
+		}
 		if _, ok := seen[table]; ok {
 			continue
 		}

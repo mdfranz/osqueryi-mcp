@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -171,6 +172,31 @@ func TestReferencedTables(t *testing.T) {
 	sql := "SELECT p.pid, u.username FROM processes p JOIN users u ON p.uid = u.uid JOIN processes q ON 1=1"
 	if got, want := referencedTables(sql), []string{"processes", "users"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("referencedTables = %v, want %v", got, want)
+	}
+
+	// A CTE name is not a missing table, and a column alias ("as ts") is not a CTE.
+	cte := "WITH recent AS (SELECT pid, datetime(start_time) as ts FROM processes) SELECT * FROM recent"
+	if got, want := referencedTables(cte), []string{"processes"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("referencedTables with CTE = %v, want %v", got, want)
+	}
+}
+
+func TestFormatColumnListTruncates(t *testing.T) {
+	narrow := []TableColumn{{Name: "uid"}, {Name: "username"}}
+	if got, want := formatColumnList(narrow), "uid, username"; got != want {
+		t.Errorf("formatColumnList = %q, want %q", got, want)
+	}
+
+	wide := make([]TableColumn, 100)
+	for i := range wide {
+		wide[i] = TableColumn{Name: fmt.Sprintf("column_number_%02d", i)}
+	}
+	got := formatColumnList(wide)
+	if len(got) > maxColumnListChars+64 {
+		t.Errorf("formatColumnList len = %d, want bounded near %d", len(got), maxColumnListChars)
+	}
+	if !strings.Contains(got, "more, use describe_table") {
+		t.Errorf("truncated list does not say how to get the rest: %q", got)
 	}
 }
 
