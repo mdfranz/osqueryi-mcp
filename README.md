@@ -15,6 +15,7 @@
   - `query_table`: Build a single-table query with validated table, column, ordering, and limit arguments.
   - `refresh_cache`: Clear and reload the cached list of tables and their schemas.
 - **Guardrails**: Structured tools validate table names and known columns. `run_query` intentionally passes its SQL through to `osqueryi`; it is not restricted to a SELECT-only subset. Every invocation uses `--config_path=/dev/null` to ignore the normal osquery configuration file on Unix-like systems.
+- **Self-correcting errors**: A rejected column names the table's valid columns, and an unknown table suggests near-miss names. `run_query` failures are annotated the same way, with the schema of each table the SQL referenced. This lets a caller fix a query from the error alone instead of spending another round trip on `describe_table`.
 - **Observability**: Structured logging (via `slog`) goes to `osqueryi-mcp.log` by default. A PID lock prevents another server using the same configured lock file from starting.
 
 ## Prerequisites
@@ -74,11 +75,22 @@ export OTEL_SERVICE_NAME=osqueryi-mcp
 ```
 
 The server exports tool, `osqueryi` subprocess, and cache spans; aggregate
-latency/count/response-size metrics; and sanitized structured logs. It does
-not export SQL, table names, filters, result data, cache paths, or raw osquery
-errors. Existing detailed `slog` output remains local. If telemetry cannot be
-initialized or exported, the MCP continues serving requests and logs a local
-warning instead.
+latency/count/response-size metrics; and sanitized structured logs. Exported
+records carry the tool name, the queried table name, outcome, error category,
+duration, and payload sizes. They do not carry SQL, `WHERE` filters, ordering,
+result data, cache paths, or raw osquery error text — those stay in the local
+`slog` output. If telemetry cannot be initialized or exported, the MCP
+continues serving requests and logs a local warning instead.
+
+`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) is worth setting for short-lived
+sessions: the SDK's 60-second default can elapse after the process has already
+exited, losing every metric for the run.
+
+When a client propagates W3C trace context in the MCP request's `_meta` field —
+as `logfire.instrument_mcp()` does by default — the server continues that trace
+instead of starting its own, so tool spans nest under the calling agent's span.
+Clients that send no trace context are unaffected, and their server spans are
+simply roots.
 
 ## Caching
 
@@ -110,6 +122,30 @@ To use an installed `osqueryi-mcp` binary with an MCP client (like Claude Deskto
   }
 }
 ```
+
+An MCP server does not necessarily inherit the shell environment, so pass any
+settings it needs explicitly. Clients that support `${VAR}` expansion can
+forward them without writing a token into the file; see
+[`.mcp.json`](.mcp.json) in this repository:
+
+```json
+{
+  "mcpServers": {
+    "osqueryi-mcp": {
+      "command": "/absolute/path/to/osqueryi-mcp",
+      "env": {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "${OTEL_EXPORTER_OTLP_ENDPOINT:-https://logfire-us.pydantic.dev}",
+        "OTEL_EXPORTER_OTLP_HEADERS": "${OTEL_EXPORTER_OTLP_HEADERS:-}"
+      }
+    }
+  }
+}
+```
+
+Because the server enables export only when both variables are non-empty, that
+configuration stays inert until a token is present in the environment. Servers
+receive their environment when they start, so restart the client after changing
+it.
 
 ## Development
 
@@ -149,6 +185,12 @@ the Agno, Strands, and Pydantic AI harnesses for every non-comment model in
 ```bash
 ./run_tests.sh
 ```
+
+If `OTEL_EXPORTER_OTLP_ENDPOINT` is unset and `.logfire/logfire_credentials.json`
+exists, the runner derives the OTLP endpoint and write token from that file so
+the Go server's telemetry lands in the same project as the harnesses' own. It
+reports which endpoint and service name it chose, or says telemetry is disabled.
+Exporting `OTEL_EXPORTER_OTLP_ENDPOINT` yourself takes precedence.
 
 ### Framework-Specific Examples
 These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using popular Python frameworks:
