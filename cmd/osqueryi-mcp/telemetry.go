@@ -166,9 +166,13 @@ var allowedLogAttributes = map[string]struct{}{
 	"bytes":          {},
 	"bytes_returned": {},
 	"tables":         {},
-	"cache_hit":      {},
-	"outcome":        {},
-	"error_type":     {},
+	// Which table a call failed on is the difference between "some tool errored" and an
+	// actionable pattern. It is a schema name, not user data, unlike the sql/error attrs
+	// that stay local.
+	"table":      {},
+	"cache_hit":  {},
+	"outcome":    {},
+	"error_type": {},
 }
 
 func (h sanitizedHandler) Enabled(ctx context.Context, level slog.Level) bool {
