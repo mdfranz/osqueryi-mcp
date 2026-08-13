@@ -52,4 +52,12 @@ Perform a more complex osquery investigation to characterize the current system 
 1. Determine baseline
 2. Look for outliers and changes in the last 5 minutes
 3. Classify as benign or malicious with justification.
+
+Work within these constraints:
+- Inspect a table's schema with describe_table or preview_table before querying it. Do not guess column names.
+- Investigate at most 8 tables and stop after roughly 20 tool calls, then answer with the evidence you have.
+- osquery event tables (process_events, socket_events, file_events, user_events) are empty unless osqueryd
+  eventing is enabled. Check one; if it returns no rows, say so and infer recency from columns like
+  processes.start_time instead.
+- State your confidence and what evidence is missing rather than widening the search.
 """
