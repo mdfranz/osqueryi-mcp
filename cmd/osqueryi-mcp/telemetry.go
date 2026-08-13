@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -16,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	logsdk "go.opentelemetry.io/otel/sdk/log"
 	metricSdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -88,6 +90,27 @@ func initTelemetry(ctx context.Context) (*Telemetry, error) {
 
 func (t *Telemetry) Enabled() bool {
 	return t != nil && t.enabled
+}
+
+var mcpPropagator = propagation.TraceContext{}
+
+// traceContextMiddleware makes tool spans children of the caller's span instead of roots of
+// their own trace. MCP has no standard trace propagation, but clients running
+// logfire.instrument_mcp() (all three test harnesses do) put a W3C traceparent in
+// params._meta. A client that sends none yields an empty carrier and the spans stay roots.
+func traceContextMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if params := req.GetParams(); params != nil {
+			carrier := propagation.MapCarrier{}
+			for key, value := range params.GetMeta() {
+				if str, ok := value.(string); ok {
+					carrier.Set(key, str)
+				}
+			}
+			ctx = mcpPropagator.Extract(ctx, carrier)
+		}
+		return next(ctx, method, req)
+	}
 }
 
 func (t *Telemetry) Shutdown(ctx context.Context) error {

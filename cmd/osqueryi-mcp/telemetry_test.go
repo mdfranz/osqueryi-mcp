@@ -8,9 +8,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type capturedHandler struct {
@@ -82,6 +84,46 @@ func TestToolSpanDoesNotRecordSensitiveErrors(t *testing.T) {
 		}
 	}
 	_ = ctx
+}
+
+func TestTraceContextMiddlewareAdoptsClientTrace(t *testing.T) {
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{
+		Name: "run_query",
+		Meta: mcp.Meta{"traceparent": "00-" + traceID + "-00f067aa0ba902b7-01"},
+	}}
+
+	var got oteltrace.SpanContext
+	handler := traceContextMiddleware(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		got = oteltrace.SpanContextFromContext(ctx)
+		return nil, nil
+	})
+	if _, err := handler(context.Background(), "tools/call", req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	if got.TraceID().String() != traceID {
+		t.Errorf("trace id = %s, want %s", got.TraceID(), traceID)
+	}
+	if !got.IsRemote() || !got.IsSampled() {
+		t.Errorf("span context = %#v, want remote and sampled", got)
+	}
+}
+
+func TestTraceContextMiddlewareWithoutTraceparent(t *testing.T) {
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "run_query"}}
+
+	var got oteltrace.SpanContext
+	handler := traceContextMiddleware(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		got = oteltrace.SpanContextFromContext(ctx)
+		return nil, nil
+	})
+	if _, err := handler(context.Background(), "tools/call", req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if got.IsValid() {
+		t.Errorf("span context = %#v, want invalid so the server starts its own trace", got)
+	}
 }
 
 func TestTelemetryIsDisabledWithoutOTLPConfiguration(t *testing.T) {

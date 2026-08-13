@@ -179,6 +179,7 @@ func main() {
 		nil,
 	)
 
+	s.AddReceivingMiddleware(traceContextMiddleware)
 	registerTools(s, executor)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
