@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"reflect"
 	"sync"
 	"time"
 
@@ -100,17 +101,34 @@ var mcpPropagator = propagation.TraceContext{}
 // params._meta. A client that sends none yields an empty carrier and the spans stay roots.
 func traceContextMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-		if params := req.GetParams(); params != nil {
-			carrier := propagation.MapCarrier{}
-			for key, value := range params.GetMeta() {
-				if str, ok := value.(string); ok {
-					carrier.Set(key, str)
-				}
+		carrier := propagation.MapCarrier{}
+		for key, value := range requestMeta(req) {
+			if str, ok := value.(string); ok {
+				carrier.Set(key, str)
 			}
-			ctx = mcpPropagator.Extract(ctx, carrier)
 		}
+		ctx = mcpPropagator.Extract(ctx, carrier)
 		return next(ctx, method, req)
 	}
+}
+
+// requestMeta returns a request's _meta, or nil when there is none.
+//
+// A params-less method (notifications/initialized is the one that matters — it arrives right
+// after the handshake) decodes to a nil *SomeParams held in a non-nil mcp.Params interface, so
+// `params != nil` is true while the pointer inside is not. Params types embed Meta by value and
+// GetMeta has a value receiver, so the promoted method dereferences that nil pointer and takes
+// the server down. The SDK guards this in its own handlers, but middleware runs before them.
+func requestMeta(req mcp.Request) map[string]any {
+	params := req.GetParams()
+	if params == nil {
+		return nil
+	}
+	// Kind must be checked first: IsNil panics on kinds that cannot be nil.
+	if value := reflect.ValueOf(params); value.Kind() == reflect.Pointer && value.IsNil() {
+		return nil
+	}
+	return params.GetMeta()
 }
 
 func (t *Telemetry) Shutdown(ctx context.Context) error {

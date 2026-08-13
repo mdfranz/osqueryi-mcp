@@ -126,6 +126,26 @@ func TestTraceContextMiddlewareWithoutTraceparent(t *testing.T) {
 	}
 }
 
+// notifications/initialized carries no params, so the SDK hands middleware a nil
+// *InitializedParams inside a non-nil mcp.Params interface. A plain `params != nil` guard
+// passes and GetMeta then dereferences the nil receiver, killing the server right after the
+// handshake. The SDK's own handler guards this (server.go:1044) but middleware runs first.
+func TestTraceContextMiddlewareWithNilParams(t *testing.T) {
+	req := &mcp.ServerRequest[*mcp.InitializedParams]{Params: nil}
+
+	called := false
+	handler := traceContextMiddleware(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		called = true
+		return nil, nil
+	})
+	if _, err := handler(context.Background(), "notifications/initialized", req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !called {
+		t.Error("next handler was not reached")
+	}
+}
+
 func TestTelemetryIsDisabledWithoutOTLPConfiguration(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "")
