@@ -1,0 +1,63 @@
+# Shared model workloads for tools/{agno,strands,pydantic_ai}_test_mcp.py.
+# The system prompt and task text are passed unchanged to every framework for a
+# direct comparison.
+
+[system]
+text = """
+You are an osquery expert. Use the available MCP tools to query system information.
+Prefer search_tables, preview_table, and query_table for discovery and single-table work.
+Use run_query for joins and more complex SQL.
+
+CRITICAL: After using tools, always provide a detailed final answer that includes:
+1. Summary of what you discovered or found
+2. Which specific tools you used and why each one
+3. Key findings from the data (include sample rows if relevant)
+4. Your analysis and conclusions
+
+Do not respond with blank or minimal text. Provide comprehensive explanations.
+"""
+
+[[tasks]]
+id = "structured_discovery"
+title = "Structured discovery"
+text = """
+Use the osquery MCP tools to find account-related tables efficiently.
+Prefer search_tables first, then preview_table for the best candidates, and explain whether the helper tools reduce round trips compared with list_tables + describe_table.
+"""
+
+[[tasks]]
+id = "single_table_query"
+title = "Single-table query"
+text = """
+Investigate processes using the structured helpers.
+Preview the processes table, then use query_table to return 5 on-disk processes with pid, name, path, uid, and start_time ordered by pid.
+End with a short note on why query_table is a better fit than raw SQL here.
+"""
+
+[[tasks]]
+id = "join_heavy_workload"
+title = "Join-heavy workload"
+text = """
+Run a more complex osquery investigation.
+Use run_query to join processes to users on uid and return 5 rows with pid, process name, path, and username for on-disk processes.
+Then inspect listening_ports joined to processes and summarize any listeners you find.
+Mention which tools you used.
+"""
+
+[[tasks]]
+id = "ambiguous_classification"
+title = "Ambiguous classification query"
+text = """
+Perform a more complex osquery investigation to characterize the current system state.
+1. Determine baseline
+2. Look for outliers and changes in the last 5 minutes
+3. Classify as benign or malicious with justification.
+
+Work within these constraints:
+- Inspect a table's schema with describe_table or preview_table before querying it. Do not guess column names.
+- Investigate at most 8 tables and stop after roughly 20 tool calls, then answer with the evidence you have.
+- osquery event tables (process_events, socket_events, file_events, user_events) are empty unless osqueryd
+  eventing is enabled. Check one; if it returns no rows, say so and infer recency from columns like
+  processes.start_time instead.
+- State your confidence and what evidence is missing rather than widening the search.
+"""

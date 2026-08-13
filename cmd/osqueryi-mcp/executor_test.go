@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,6 +28,18 @@ case "$3" in
     ;;
   *"bad query"*)
     printf '%s\n' 'invalid SQL' >&2
+    exit 1
+    ;;
+  *"SELECT bogus FROM users"*)
+    printf '%s\n' 'Error: no such column: bogus' >&2
+    exit 1
+    ;;
+  *"FROM userss"*)
+    printf '%s\n' 'Error: no such table: userss' >&2
+    exit 1
+    ;;
+  *"FROM missingtbl"*)
+    printf '%s\n' 'Error: no such column: name' >&2
     exit 1
     ;;
   *)
@@ -96,13 +109,94 @@ func TestCacheRoundTrip(t *testing.T) {
 		"users": {{Name: "username", Type: "TEXT"}},
 	}
 	e.allSchemasFetched = true
-	if err := e.saveCache(); err != nil {
+	if err := e.saveCache(context.Background()); err != nil {
 		t.Fatalf("save cache: %v", err)
 	}
 
 	loaded := NewExecutor("unused", time.Second, cacheFile)
 	if !reflect.DeepEqual(loaded.tables, e.tables) || !reflect.DeepEqual(loaded.schemas, e.schemas) || !loaded.allSchemasFetched {
 		t.Fatalf("loaded cache = %#v, want %#v", loaded, e)
+	}
+}
+
+func TestSimilarTables(t *testing.T) {
+	tables := []string{"interface_addresses", "interface_details", "processes", "users"}
+
+	got := similarTables("interfaces_addresses", tables)
+	if len(got) == 0 || got[0] != "interface_addresses" {
+		t.Errorf("similarTables(interfaces_addresses) = %v, want interface_addresses first", got)
+	}
+	if got := similarTables("signed_system_files", tables); len(got) != 0 {
+		t.Errorf("similarTables with no near miss = %v, want none", got)
+	}
+}
+
+func TestRunQueryErrorAnnotation(t *testing.T) {
+	e := NewExecutor(writeFakeOSQuery(t), time.Second, "off")
+	ctx := context.Background()
+
+	_, err := e.RunQuery(ctx, "SELECT bogus FROM users LIMIT 1")
+	if err == nil {
+		t.Fatal("bad column query succeeded")
+	}
+	if !strings.Contains(err.Error(), "columns in users: username, uid") {
+		t.Errorf("no such column error omits the table schema: %v", err)
+	}
+
+	_, err = e.RunQuery(ctx, "SELECT uid FROM userss LIMIT 1")
+	if err == nil {
+		t.Fatal("bad table query succeeded")
+	}
+	if !strings.Contains(err.Error(), "did you mean: users") {
+		t.Errorf("no such table error omits suggestions: %v", err)
+	}
+
+	// osqueryi reports a missing table as a column error, so this path has to surface the
+	// table problem rather than silently skipping the unknown table.
+	_, err = e.RunQuery(ctx, "SELECT name FROM missingtbl LIMIT 1")
+	if err == nil {
+		t.Fatal("query against missing table succeeded")
+	}
+	if !strings.Contains(err.Error(), "unknown table: missingtbl") {
+		t.Errorf("column error on a missing table omits the table problem: %v", err)
+	}
+
+	// Errors that name neither a column nor a table pass through unchanged.
+	_, err = e.RunQuery(ctx, "bad query")
+	if err == nil || err.Error() != "invalid SQL" {
+		t.Errorf("unrelated error was rewritten: %v", err)
+	}
+}
+
+func TestReferencedTables(t *testing.T) {
+	sql := "SELECT p.pid, u.username FROM processes p JOIN users u ON p.uid = u.uid JOIN processes q ON 1=1"
+	if got, want := referencedTables(sql), []string{"processes", "users"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("referencedTables = %v, want %v", got, want)
+	}
+
+	// A CTE name is not a missing table, and a column alias ("as ts") is not a CTE.
+	cte := "WITH recent AS (SELECT pid, datetime(start_time) as ts FROM processes) SELECT * FROM recent"
+	if got, want := referencedTables(cte), []string{"processes"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("referencedTables with CTE = %v, want %v", got, want)
+	}
+}
+
+func TestFormatColumnListTruncates(t *testing.T) {
+	narrow := []TableColumn{{Name: "uid"}, {Name: "username"}}
+	if got, want := formatColumnList(narrow), "uid, username"; got != want {
+		t.Errorf("formatColumnList = %q, want %q", got, want)
+	}
+
+	wide := make([]TableColumn, 100)
+	for i := range wide {
+		wide[i] = TableColumn{Name: fmt.Sprintf("column_number_%02d", i)}
+	}
+	got := formatColumnList(wide)
+	if len(got) > maxColumnListChars+64 {
+		t.Errorf("formatColumnList len = %d, want bounded near %d", len(got), maxColumnListChars)
+	}
+	if !strings.Contains(got, "more, use describe_table") {
+		t.Errorf("truncated list does not say how to get the rest: %q", got)
 	}
 }
 
@@ -116,14 +210,24 @@ func TestValidationAndTruncation(t *testing.T) {
 		}
 	}
 
-	valid := map[string]struct{}{"uid": {}, "username": {}}
-	if _, err := validateSelectedColumns([]string{"missing"}, valid); err == nil {
+	schema := []TableColumn{{Name: "uid"}, {Name: "username"}}
+	// The valid-column list in the message is what lets a model retry without a describe_table
+	// round trip, so assert on it rather than just on err != nil.
+	_, err := validateSelectedColumns([]string{"missing"}, schema)
+	if err == nil {
 		t.Error("unknown selected column was accepted")
+	} else if !strings.Contains(err.Error(), "uid, username") {
+		t.Errorf("unknown column error omits valid columns: %v", err)
 	}
-	if got, err := validateOrderBy([]string{"uid desc"}, valid); err != nil || !reflect.DeepEqual(got, []string{"uid DESC"}) {
+	if got, err := validateOrderBy([]string{"uid desc"}, schema); err != nil || !reflect.DeepEqual(got, []string{"uid DESC"}) {
 		t.Fatalf("order by = %v, %v", got, err)
 	}
-	if _, err := validateOrderBy([]string{"uid sideways"}, valid); err == nil {
+	if _, err := validateOrderBy([]string{"missing desc"}, schema); err == nil {
+		t.Error("unknown order_by column was accepted")
+	} else if !strings.Contains(err.Error(), "uid, username") {
+		t.Errorf("unknown order_by column error omits valid columns: %v", err)
+	}
+	if _, err := validateOrderBy([]string{"uid sideways"}, schema); err == nil {
 		t.Error("invalid order direction was accepted")
 	}
 	if _, err := validateWhereClause("uid = 1; DROP TABLE users"); err == nil {

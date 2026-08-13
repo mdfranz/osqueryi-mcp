@@ -3,7 +3,11 @@
     "osqueryi-mcp": {
       "command": "./osqueryi-mcp",
       "env": {
-        "OSQUERYI_DEBUG": "true"
+        "OSQUERYI_DEBUG": "true",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "${OTEL_EXPORTER_OTLP_ENDPOINT:-https://logfire-eu.pydantic.dev}",
+        "OTEL_EXPORTER_OTLP_HEADERS": "${OTEL_EXPORTER_OTLP_HEADERS:-}",
+        "OTEL_SERVICE_NAME": "${OTEL_SERVICE_NAME:-osqueryi-mcp}",
+        "OTEL_METRIC_EXPORT_INTERVAL": "${OTEL_METRIC_EXPORT_INTERVAL:-5000}"
       }
     }
   }

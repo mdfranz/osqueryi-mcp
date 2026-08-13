@@ -1,5 +1,5 @@
 APP_NAME = osqueryi-mcp
-GIT_COMMIT := $(shell git rev-parse --short HEAD)
+GIT_COMMIT := $(shell git rev-parse --short=12 HEAD)
 
 .PHONY: all build run test fmt vet install clean
 

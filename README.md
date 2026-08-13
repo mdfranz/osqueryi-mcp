@@ -15,6 +15,7 @@
   - `query_table`: Build a single-table query with validated table, column, ordering, and limit arguments.
   - `refresh_cache`: Clear and reload the cached list of tables and their schemas.
 - **Guardrails**: Structured tools validate table names and known columns. `run_query` intentionally passes its SQL through to `osqueryi`; it is not restricted to a SELECT-only subset. Every invocation uses `--config_path=/dev/null` to ignore the normal osquery configuration file on Unix-like systems.
+- **Self-correcting errors**: A rejected column names the table's valid columns, and an unknown table suggests near-miss names. `run_query` failures are annotated the same way, with the schema of each table the SQL referenced. This lets a caller fix a query from the error alone instead of spending another round trip on `describe_table`.
 - **Observability**: Structured logging (via `slog`) goes to `osqueryi-mcp.log` by default. A PID lock prevents another server using the same configured lock file from starting.
 
 ## Prerequisites
@@ -57,6 +58,39 @@ The server is configured via environment variables:
 | `OSQUERYI_CACHEFILE` | `osqueryi-mcp-cache.json` | Path to the schema cache file. Set to `off` to disable. |
 | `OSQUERYI_DEBUG` | (unset) | Set to any value to enable debug-level logging. |
 | `OSQUERYI_LOGFILE` | `osqueryi-mcp.log` | Path to a file for logging. Set to `off` or use an empty string to log to stderr. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | Enables OpenTelemetry export when set together with `OTEL_EXPORTER_OTLP_HEADERS`. Use `https://logfire-us.pydantic.dev` for Logfire US or `https://logfire-eu.pydantic.dev` for EU. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | (unset) | OTLP request headers. For Logfire: `Authorization=<write token>`. Keep the token out of source control. |
+| `OTEL_SERVICE_NAME` | `osqueryi-mcp` | Optional service name shown in Logfire. |
+
+### Logfire observability
+
+Logfire export is disabled by default. To enable it, create a Logfire project
+and write token, then configure standard OpenTelemetry variables in the MCP
+client environment:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://logfire-us.pydantic.dev
+export OTEL_EXPORTER_OTLP_HEADERS='Authorization=your-write-token'
+export OTEL_SERVICE_NAME=osqueryi-mcp
+```
+
+The server exports tool, `osqueryi` subprocess, and cache spans; aggregate
+latency/count/response-size metrics; and sanitized structured logs. Exported
+records carry the tool name, the queried table name, outcome, error category,
+duration, and payload sizes. They do not carry SQL, `WHERE` filters, ordering,
+result data, cache paths, or raw osquery error text — those stay in the local
+`slog` output. If telemetry cannot be initialized or exported, the MCP
+continues serving requests and logs a local warning instead.
+
+`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) is worth setting for short-lived
+sessions: the SDK's 60-second default can elapse after the process has already
+exited, losing every metric for the run.
+
+When a client propagates W3C trace context in the MCP request's `_meta` field —
+as `logfire.instrument_mcp()` does by default — the server continues that trace
+instead of starting its own, so tool spans nest under the calling agent's span.
+Clients that send no trace context are unaffected, and their server spans are
+simply roots.
 
 ## Caching
 
@@ -88,6 +122,30 @@ To use an installed `osqueryi-mcp` binary with an MCP client (like Claude Deskto
   }
 }
 ```
+
+An MCP server does not necessarily inherit the shell environment, so pass any
+settings it needs explicitly. Clients that support `${VAR}` expansion can
+forward them without writing a token into the file; see
+[`.mcp.json`](.mcp.json) in this repository:
+
+```json
+{
+  "mcpServers": {
+    "osqueryi-mcp": {
+      "command": "/absolute/path/to/osqueryi-mcp",
+      "env": {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "${OTEL_EXPORTER_OTLP_ENDPOINT:-https://logfire-us.pydantic.dev}",
+        "OTEL_EXPORTER_OTLP_HEADERS": "${OTEL_EXPORTER_OTLP_HEADERS:-}"
+      }
+    }
+  }
+}
+```
+
+Because the server enables export only when both variables are non-empty, that
+configuration stays inert until a token is present in the environment. Servers
+receive their environment when they start, so restart the client after changing
+it.
 
 ## Development
 
@@ -128,6 +186,12 @@ the Agno, Strands, and Pydantic AI harnesses for every non-comment model in
 ./run_tests.sh
 ```
 
+If `OTEL_EXPORTER_OTLP_ENDPOINT` is unset and `.logfire/logfire_credentials.json`
+exists, the runner derives the OTLP endpoint and write token from that file so
+the Go server's telemetry lands in the same project as the harnesses' own. It
+reports which endpoint and service name it chose, or says telemetry is disabled.
+Exporting `OTEL_EXPORTER_OTLP_ENDPOINT` yourself takes precedence.
+
 ### Framework-Specific Examples
 These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using popular Python frameworks:
 
@@ -135,11 +199,21 @@ These examples demonstrate how to connect LLM agents to `osqueryi-mcp` using pop
 - **Strands (AWS)**: `uv run tools/strands_test_mcp.py [model_id]` — default: `claude-haiku-4-5`
 - **Pydantic AI**: `uv run tools/pydantic_ai_test_mcp.py [model_id]` — default: `claude-haiku-4-5`
 
+The LLM workloads and system prompts live in
+[`tools/prompts/osquery_benchmark.toml`](tools/prompts/osquery_benchmark.toml).
+Add a `[[tasks]]` entry there to run a new shared workload in all three
+frameworks. Keep the common prompt fields unchanged across frameworks for an
+apples-to-apples comparison.
+
 Set the API key for the selected provider: `OPENAI_API_KEY` for OpenAI,
 `GOOGLE_API_KEY` (or `GEMINI_API_KEY` where supported) for Gemini, or
 `ANTHROPIC_API_KEY` for Claude. The harnesses default the MCP PID lock and
 server logfile to `off` so they can start their own temporary stdio server;
 explicitly supplied environment values take precedence.
+
+When telemetry is enabled, Logfire receives the current 12-character Git
+revision as `service.version` for both the server and framework harnesses. Set
+`OSQUERYI_GIT_REVISION` when running a harness outside a Git checkout.
 
 For a framework example after building in the project root without installing:
 

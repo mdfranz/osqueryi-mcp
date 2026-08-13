@@ -34,6 +34,18 @@ go.work.sum
 *cache.json
 
 # Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
 *.egg-info/
 .venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
+# OS and Editor files
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/

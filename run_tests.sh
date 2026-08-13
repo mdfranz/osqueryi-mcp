@@ -34,6 +34,27 @@ make build
 export OSQUERYI_DEBUG=true
 export PATH=$PATH:$(pwd)
 
+# The Go server exports telemetry only when both OTLP vars are set, and it never reads
+# .logfire/logfire_credentials.json the way the Python harness does — so without this the
+# agent runs are traced and the server they call is not. Reuse the same project token.
+LOGFIRE_CREDENTIALS=".logfire/logfire_credentials.json"
+if [ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && [ -f "$LOGFIRE_CREDENTIALS" ]; then
+    LOGFIRE_ENDPOINT=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['logfire_api_url'])" "$LOGFIRE_CREDENTIALS" 2>/dev/null || true)
+    LOGFIRE_TOKEN=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['token'])" "$LOGFIRE_CREDENTIALS" 2>/dev/null || true)
+    if [ -n "$LOGFIRE_ENDPOINT" ] && [ -n "$LOGFIRE_TOKEN" ]; then
+        export OTEL_EXPORTER_OTLP_ENDPOINT="$LOGFIRE_ENDPOINT"
+        export OTEL_EXPORTER_OTLP_HEADERS="Authorization=$LOGFIRE_TOKEN"
+        export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-osqueryi-mcp}"
+        # The metrics PeriodicReader defaults to 60s, which is longer than a short run.
+        export OTEL_METRIC_EXPORT_INTERVAL="${OTEL_METRIC_EXPORT_INTERVAL:-5000}"
+        echo "--- Server telemetry -> $OTEL_EXPORTER_OTLP_ENDPOINT as $OTEL_SERVICE_NAME ---"
+    else
+        echo "--- Could not read $LOGFIRE_CREDENTIALS; server telemetry disabled ---"
+    fi
+elif [ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
+    echo "--- No OTLP endpoint and no $LOGFIRE_CREDENTIALS; server telemetry disabled ---"
+fi
+
 if [ "$USE_LOGS" = true ]; then
     export OSQUERYI_LOGFILE="$LOG_FILE"
     # Clear log file from previous runs

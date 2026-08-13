@@ -13,6 +13,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Executor struct {
@@ -41,7 +46,7 @@ func NewExecutor(binaryPath string, timeout time.Duration, cacheFile string) *Ex
 	}
 
 	if cacheFile != "" && cacheFile != "off" {
-		if err := e.loadCache(); err != nil {
+		if err := e.loadCache(context.Background()); err != nil {
 			if os.IsNotExist(err) {
 				slog.Info("cache file not found, will create on exit or after warming", "file", cacheFile)
 			} else {
@@ -55,14 +60,21 @@ func NewExecutor(binaryPath string, timeout time.Duration, cacheFile string) *Ex
 	return e
 }
 
-func (e *Executor) loadCache() error {
+func (e *Executor) loadCache(ctx context.Context) error {
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.cache.load")
+	defer span.End()
+
 	data, err := os.ReadFile(e.cacheFile)
 	if err != nil {
+		span.SetStatus(codes.Error, errorType(ctx, err))
+		recordCacheOperation(ctx, "load", "error")
 		return err
 	}
 
 	var pc PersistedCache
 	if err := json.Unmarshal(data, &pc); err != nil {
+		span.SetStatus(codes.Error, "decode_failed")
+		recordCacheOperation(ctx, "load", "error")
 		return err
 	}
 
@@ -71,15 +83,19 @@ func (e *Executor) loadCache() error {
 	e.tables = pc.Tables
 	e.schemas = pc.Schemas
 	e.allSchemasFetched = pc.AllSchemasFetched
+	span.SetAttributes(attribute.Int("cache.tables", len(pc.Tables)))
+	recordCacheOperation(ctx, "load", "ok")
 	return nil
 }
 
-func (e *Executor) saveCache() error {
+func (e *Executor) saveCache(ctx context.Context) error {
 	if e.cacheFile == "" || e.cacheFile == "off" {
 		return nil
 	}
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.cache.save")
+	defer span.End()
 
-	slog.Info("saving cache to disk", "file", e.cacheFile)
+	slog.InfoContext(ctx, "saving cache to disk", "file", e.cacheFile)
 
 	e.mu.RLock()
 	pc := PersistedCache{
@@ -91,15 +107,21 @@ func (e *Executor) saveCache() error {
 
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
-		slog.Error("failed to marshal cache", "error", err)
+		span.SetStatus(codes.Error, "encode_failed")
+		recordCacheOperation(ctx, "save", "error")
+		slog.ErrorContext(ctx, "failed to marshal cache", "error", err, "error_type", "encode_failed")
 		return err
 	}
 
 	err = os.WriteFile(e.cacheFile, data, 0644)
 	if err != nil {
-		slog.Error("failed to write cache file", "file", e.cacheFile, "error", err)
+		span.SetStatus(codes.Error, errorType(ctx, err))
+		recordCacheOperation(ctx, "save", "error")
+		slog.ErrorContext(ctx, "failed to write cache file", "file", e.cacheFile, "error", err, "error_type", errorType(ctx, err))
 	} else {
-		slog.Info("saved cache to disk", "file", e.cacheFile, "tables", len(pc.Tables))
+		span.SetAttributes(attribute.Int("cache.tables", len(pc.Tables)), attribute.Int("osquery.output.bytes", len(data)))
+		recordCacheOperation(ctx, "save", "ok")
+		slog.InfoContext(ctx, "saved cache to disk", "file", e.cacheFile, "tables", len(pc.Tables), "outcome", "ok")
 	}
 	return err
 }
@@ -120,10 +142,12 @@ type SearchMatch struct {
 }
 
 func (e *Executor) runSQL(ctx context.Context, sql string) ([]byte, error) {
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.execute")
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	slog.Debug("executing_sql", "sql", sql)
+	slog.DebugContext(ctx, "executing_sql", "sql", sql)
 	cmd := exec.CommandContext(ctx, e.binaryPath, "--json", "--config_path=/dev/null", sql)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -134,16 +158,21 @@ func (e *Executor) runSQL(ctx context.Context, sql string) ([]byte, error) {
 	duration := time.Since(start)
 
 	if err != nil {
+		outcome := errorType(ctx, err)
+		span.SetStatus(codes.Error, outcome)
+		recordOSQueryMetrics(ctx, duration, outcome)
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
-			slog.Debug("exec_failed", "sql", sql, "error", err, "duration_ms", duration.Milliseconds())
+			slog.DebugContext(ctx, "exec_failed", "sql", sql, "error", err, "error_type", outcome, "duration_ms", duration.Milliseconds())
 			return nil, err
 		}
-		slog.Debug("exec_failed", "sql", sql, "error", errMsg, "duration_ms", duration.Milliseconds())
+		slog.DebugContext(ctx, "exec_failed", "sql", sql, "error", errMsg, "error_type", outcome, "duration_ms", duration.Milliseconds())
 		return nil, fmt.Errorf("%s", errMsg)
 	}
 
-	slog.Debug("exec_completed", "sql", sql, "duration_ms", duration.Milliseconds(), "bytes", stdout.Len())
+	span.SetAttributes(attribute.Int("osquery.output.bytes", stdout.Len()), attribute.String("outcome", "ok"))
+	recordOSQueryMetrics(ctx, duration, "ok")
+	slog.DebugContext(ctx, "exec_completed", "sql", sql, "duration_ms", duration.Milliseconds(), "bytes", stdout.Len(), "outcome", "ok")
 	return stdout.Bytes(), nil
 }
 
@@ -152,11 +181,13 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	if len(e.tables) > 0 {
 		tables := append([]string(nil), e.tables...)
 		e.mu.RUnlock()
+		trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", true))
 		return tables, nil
 	}
 	e.mu.RUnlock()
 
-	slog.Debug("listing_tables")
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", false))
+	slog.DebugContext(ctx, "listing_tables")
 	data, err := e.runSQL(ctx, "SELECT name FROM osquery_registry WHERE registry = 'table' ORDER BY name;")
 	if err != nil {
 		return nil, err
@@ -178,7 +209,7 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 	if len(e.tables) == 0 {
 		e.tables = append([]string(nil), tables...)
 		e.mu.Unlock()
-		_ = e.saveCache()
+		_ = e.saveCache(ctx)
 	} else {
 		e.mu.Unlock()
 	}
@@ -187,7 +218,7 @@ func (e *Executor) listTables(ctx context.Context) ([]string, error) {
 }
 
 func (e *Executor) fetchAllSchemas(ctx context.Context) error {
-	slog.Debug("fetching_all_schemas")
+	slog.DebugContext(ctx, "fetching_all_schemas")
 	query := "SELECT m.name as table_name, p.* FROM (SELECT name FROM osquery_registry WHERE registry = 'table') m, pragma_table_info(m.name) p;"
 	data, err := e.runSQL(ctx, query)
 	if err != nil {
@@ -225,7 +256,7 @@ func (e *Executor) fetchAllSchemas(ctx context.Context) error {
 	e.allSchemasFetched = true
 	e.mu.Unlock()
 
-	return e.saveCache()
+	return e.saveCache(ctx)
 }
 
 func (e *Executor) ensureAllSchemas(ctx context.Context) error {
@@ -251,6 +282,8 @@ func (e *Executor) ensureAllSchemas(ctx context.Context) error {
 }
 
 func (e *Executor) RefreshCache(ctx context.Context) error {
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "osqueryi.cache.refresh")
+	defer span.End()
 	e.warmMu.Lock()
 	defer e.warmMu.Unlock()
 
@@ -260,7 +293,14 @@ func (e *Executor) RefreshCache(ctx context.Context) error {
 	e.allSchemasFetched = false
 	e.mu.Unlock()
 
-	return e.fetchAllSchemas(ctx)
+	err := e.fetchAllSchemas(ctx)
+	if err != nil {
+		span.SetStatus(codes.Error, errorType(ctx, err))
+		recordCacheOperation(ctx, "refresh", "error")
+		return err
+	}
+	recordCacheOperation(ctx, "refresh", "ok")
+	return nil
 }
 
 var tableNameRegex = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -288,7 +328,61 @@ func (e *Executor) ensureKnownTable(ctx context.Context, tableName string) error
 		}
 	}
 
-	return fmt.Errorf("unknown table: %s", tableName)
+	if suggestions := similarTables(tableName, tables); len(suggestions) > 0 {
+		return fmt.Errorf("unknown table: %s\ndid you mean: %s", tableName, strings.Join(suggestions, ", "))
+	}
+	return fmt.Errorf("unknown table: %s\nno similar table exists; use search_tables to find one", tableName)
+}
+
+func commonPrefixLen(a, b string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
+// Near-miss table names (interfaces_addresses for interface_addresses) are a common model
+// error. Substring/prefix/token overlap catches those without pulling in a distance library,
+// and returning nothing is fine — the caller falls back to pointing at search_tables.
+func similarTables(name string, tables []string) []string {
+	wanted := strings.Split(name, "_")
+	type scored struct {
+		name  string
+		score int
+	}
+
+	var matches []scored
+	for _, table := range tables {
+		score := commonPrefixLen(name, table)
+		if strings.Contains(table, name) || strings.Contains(name, table) {
+			score += min(len(name), len(table))
+		}
+		for _, token := range wanted {
+			if len(token) >= 4 && strings.Contains(table, token) {
+				score += len(token)
+			}
+		}
+		if score >= 6 {
+			matches = append(matches, scored{table, score})
+		}
+	}
+
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return matches[i].name < matches[j].name
+	})
+
+	suggestions := make([]string, 0, 5)
+	for _, match := range matches {
+		if len(suggestions) == 5 {
+			break
+		}
+		suggestions = append(suggestions, match.name)
+	}
+	return suggestions
 }
 
 func (e *Executor) describeTableColumns(ctx context.Context, tableName string) ([]TableColumn, error) {
@@ -300,9 +394,11 @@ func (e *Executor) describeTableColumns(ctx context.Context, tableName string) (
 	if columns, ok := e.schemas[tableName]; ok {
 		cached := append([]TableColumn(nil), columns...)
 		e.mu.RUnlock()
+		trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", true))
 		return cached, nil
 	}
 	e.mu.RUnlock()
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Bool("cache.hit", false))
 
 	query := fmt.Sprintf("PRAGMA table_info(%s);", tableName)
 	data, err := e.runSQL(ctx, query)
@@ -319,7 +415,7 @@ func (e *Executor) describeTableColumns(ctx context.Context, tableName string) (
 	if _, ok := e.schemas[tableName]; !ok {
 		e.schemas[tableName] = append([]TableColumn(nil), columns...)
 		e.mu.Unlock()
-		_ = e.saveCache()
+		_ = e.saveCache(ctx)
 	} else {
 		e.mu.Unlock()
 	}
@@ -349,11 +445,52 @@ func columnSet(columns []TableColumn) map[string]struct{} {
 	return valid
 }
 
-func validateSelectedColumns(selected []string, valid map[string]struct{}) ([]string, error) {
+func columnNames(columns []TableColumn) []string {
+	names := make([]string, 0, len(columns))
+	for _, column := range columns {
+		names = append(names, column.Name)
+	}
+	return names
+}
+
+// maxColumnListChars keeps an error from growing past the point of usefulness. Results are
+// capped by truncateJSON; errors are not, and a wide join can name five tables at once.
+const maxColumnListChars = 600
+
+func formatColumnList(schema []TableColumn) string {
+	names := columnNames(schema)
+	joined := strings.Join(names, ", ")
+	if len(joined) <= maxColumnListChars {
+		return joined
+	}
+
+	kept := 0
+	length := 0
+	for _, name := range names {
+		next := length + len(name) + 2 // ", "
+		if next > maxColumnListChars {
+			break
+		}
+		length = next
+		kept++
+	}
+	return fmt.Sprintf("%s, ... (%d more, use describe_table)", strings.Join(names[:kept], ", "), len(names)-kept)
+}
+
+// Models routinely guess column names and, without the valid set in the error, burn a whole
+// extra round trip on describe_table before retrying. Naming the alternatives lets them fix
+// the call from the error alone.
+func unknownColumnError(kind, column string, schema []TableColumn) error {
+	return fmt.Errorf("unknown %s: %s\nvalid columns for this table: %s",
+		kind, column, formatColumnList(schema))
+}
+
+func validateSelectedColumns(selected []string, schema []TableColumn) ([]string, error) {
 	if len(selected) == 0 {
 		return nil, nil
 	}
 
+	valid := columnSet(schema)
 	normalized := make([]string, 0, len(selected))
 	for _, column := range selected {
 		column = strings.TrimSpace(column)
@@ -361,7 +498,7 @@ func validateSelectedColumns(selected []string, valid map[string]struct{}) ([]st
 			continue
 		}
 		if _, ok := valid[column]; !ok {
-			return nil, fmt.Errorf("unknown column: %s", column)
+			return nil, unknownColumnError("column", column, schema)
 		}
 		normalized = append(normalized, column)
 	}
@@ -373,7 +510,8 @@ func validateSelectedColumns(selected []string, valid map[string]struct{}) ([]st
 	return normalized, nil
 }
 
-func validateOrderBy(orderBy []string, valid map[string]struct{}) ([]string, error) {
+func validateOrderBy(orderBy []string, schema []TableColumn) ([]string, error) {
+	valid := columnSet(schema)
 	normalized := make([]string, 0, len(orderBy))
 
 	for _, raw := range orderBy {
@@ -389,7 +527,7 @@ func validateOrderBy(orderBy []string, valid map[string]struct{}) ([]string, err
 
 		column := parts[0]
 		if _, ok := valid[column]; !ok {
-			return nil, fmt.Errorf("unknown order_by column: %s", column)
+			return nil, unknownColumnError("order_by column", column, schema)
 		}
 
 		if len(parts) == 1 {
@@ -487,10 +625,89 @@ func (e *Executor) DescribeTable(ctx context.Context, tableName string) ([]byte,
 	return json.Marshal(columns)
 }
 
+var (
+	noSuchColumnRegex = regexp.MustCompile(`no such column: [A-Za-z_][A-Za-z0-9_.]*`)
+	noSuchTableRegex  = regexp.MustCompile(`no such table: ([A-Za-z_][A-Za-z0-9_]*)`)
+	sqlTableRefRegex  = regexp.MustCompile(`(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*)`)
+	// A CTE is the only place an identifier is followed by "AS (" — a column alias ("as ts")
+	// has no parenthesis, and a derived-table alias follows the closing one.
+	sqlCTENameRegex = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_]*)\s+as\s*\(`)
+)
+
+// maxAnnotatedTables bounds how many schemas get appended to a failing query, so a wide join
+// cannot turn one error into a larger payload than the result would have been.
+const maxAnnotatedTables = 5
+
+func referencedTables(sql string) []string {
+	var tables []string
+	// "WITH recent AS (...) SELECT * FROM recent" otherwise reports "unknown table: recent",
+	// sending the model after a table that was never missing.
+	ctes := make(map[string]struct{})
+	for _, match := range sqlCTENameRegex.FindAllStringSubmatch(sql, -1) {
+		ctes[strings.ToLower(match[1])] = struct{}{}
+	}
+
+	seen := make(map[string]struct{})
+	for _, match := range sqlTableRefRegex.FindAllStringSubmatch(sql, -1) {
+		table := match[1]
+		if _, isCTE := ctes[strings.ToLower(table)]; isCTE {
+			continue
+		}
+		if _, ok := seen[table]; ok {
+			continue
+		}
+		seen[table] = struct{}{}
+		tables = append(tables, table)
+		if len(tables) == maxAnnotatedTables {
+			break
+		}
+	}
+	return tables
+}
+
+// osqueryi reports only "no such column: x" / "no such table: y", which costs a model an extra
+// describe_table turn before it can retry. Attach the same context the query_table validation
+// errors carry. Best-effort: any lookup failure leaves the original error untouched.
+func (e *Executor) annotateQueryError(ctx context.Context, sql string, queryErr error) error {
+	message := queryErr.Error()
+
+	if match := noSuchTableRegex.FindStringSubmatch(message); match != nil {
+		tables, err := e.listTables(ctx)
+		if err != nil {
+			return queryErr
+		}
+		if suggestions := similarTables(match[1], tables); len(suggestions) > 0 {
+			return fmt.Errorf("%s\ndid you mean: %s", message, strings.Join(suggestions, ", "))
+		}
+		return fmt.Errorf("%s\nno similar table exists; use search_tables to find one", message)
+	}
+
+	if noSuchColumnRegex.MatchString(message) {
+		var schemas strings.Builder
+		for _, table := range referencedTables(sql) {
+			schema, err := e.describeTableColumns(ctx, table)
+			if err != nil {
+				// osqueryi reports a missing table as a column error, so the real problem is
+				// often the table name. ensureKnownTable's message already carries suggestions.
+				if strings.HasPrefix(err.Error(), "unknown table:") {
+					fmt.Fprintf(&schemas, "\n%s", err.Error())
+				}
+				continue
+			}
+			fmt.Fprintf(&schemas, "\ncolumns in %s: %s", table, strings.Join(columnNames(schema), ", "))
+		}
+		if schemas.Len() > 0 {
+			return fmt.Errorf("%s%s", message, schemas.String())
+		}
+	}
+
+	return queryErr
+}
+
 func (e *Executor) RunQuery(ctx context.Context, sql string) ([]byte, error) {
 	data, err := e.runSQL(ctx, sql)
 	if err != nil {
-		return nil, err
+		return nil, e.annotateQueryError(ctx, sql, err)
 	}
 	return e.truncateJSON(data)
 }
@@ -650,8 +867,7 @@ func (e *Executor) QueryTable(ctx context.Context, tableName string, columns []s
 		return nil, err
 	}
 
-	validColumns := columnSet(schema)
-	columns, err = validateSelectedColumns(columns, validColumns)
+	columns, err = validateSelectedColumns(columns, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -661,7 +877,7 @@ func (e *Executor) QueryTable(ctx context.Context, tableName string, columns []s
 		return nil, err
 	}
 
-	orderBy, err = validateOrderBy(orderBy, validColumns)
+	orderBy, err = validateOrderBy(orderBy, schema)
 	if err != nil {
 		return nil, err
 	}

@@ -7,7 +7,9 @@ requires-python = ">=3.14"
 dependencies = [
     "agno>=2.7.4",
     "google-genai>=2.12.1",
+    "logfire[system-metrics]>=4.40.0",
     "openai>=2.46.0",
+    "openinference-instrumentation-agno>=1.0.1",
     "pydantic-ai>=2.13.0",
     "strands-agents>=1.48.0",
 ]
