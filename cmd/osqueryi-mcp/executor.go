@@ -328,7 +328,61 @@ func (e *Executor) ensureKnownTable(ctx context.Context, tableName string) error
 		}
 	}
 
-	return fmt.Errorf("unknown table: %s", tableName)
+	if suggestions := similarTables(tableName, tables); len(suggestions) > 0 {
+		return fmt.Errorf("unknown table: %s\ndid you mean: %s", tableName, strings.Join(suggestions, ", "))
+	}
+	return fmt.Errorf("unknown table: %s\nno similar table exists; use search_tables to find one", tableName)
+}
+
+func commonPrefixLen(a, b string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
+// Near-miss table names (interfaces_addresses for interface_addresses) are a common model
+// error. Substring/prefix/token overlap catches those without pulling in a distance library,
+// and returning nothing is fine — the caller falls back to pointing at search_tables.
+func similarTables(name string, tables []string) []string {
+	wanted := strings.Split(name, "_")
+	type scored struct {
+		name  string
+		score int
+	}
+
+	var matches []scored
+	for _, table := range tables {
+		score := commonPrefixLen(name, table)
+		if strings.Contains(table, name) || strings.Contains(name, table) {
+			score += min(len(name), len(table))
+		}
+		for _, token := range wanted {
+			if len(token) >= 4 && strings.Contains(table, token) {
+				score += len(token)
+			}
+		}
+		if score >= 6 {
+			matches = append(matches, scored{table, score})
+		}
+	}
+
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return matches[i].name < matches[j].name
+	})
+
+	suggestions := make([]string, 0, 5)
+	for _, match := range matches {
+		if len(suggestions) == 5 {
+			break
+		}
+		suggestions = append(suggestions, match.name)
+	}
+	return suggestions
 }
 
 func (e *Executor) describeTableColumns(ctx context.Context, tableName string) ([]TableColumn, error) {
@@ -391,11 +445,28 @@ func columnSet(columns []TableColumn) map[string]struct{} {
 	return valid
 }
 
-func validateSelectedColumns(selected []string, valid map[string]struct{}) ([]string, error) {
+func columnNames(columns []TableColumn) []string {
+	names := make([]string, 0, len(columns))
+	for _, column := range columns {
+		names = append(names, column.Name)
+	}
+	return names
+}
+
+// Models routinely guess column names and, without the valid set in the error, burn a whole
+// extra round trip on describe_table before retrying. Naming the alternatives lets them fix
+// the call from the error alone.
+func unknownColumnError(kind, column string, schema []TableColumn) error {
+	return fmt.Errorf("unknown %s: %s\nvalid columns for this table: %s",
+		kind, column, strings.Join(columnNames(schema), ", "))
+}
+
+func validateSelectedColumns(selected []string, schema []TableColumn) ([]string, error) {
 	if len(selected) == 0 {
 		return nil, nil
 	}
 
+	valid := columnSet(schema)
 	normalized := make([]string, 0, len(selected))
 	for _, column := range selected {
 		column = strings.TrimSpace(column)
@@ -403,7 +474,7 @@ func validateSelectedColumns(selected []string, valid map[string]struct{}) ([]st
 			continue
 		}
 		if _, ok := valid[column]; !ok {
-			return nil, fmt.Errorf("unknown column: %s", column)
+			return nil, unknownColumnError("column", column, schema)
 		}
 		normalized = append(normalized, column)
 	}
@@ -415,7 +486,8 @@ func validateSelectedColumns(selected []string, valid map[string]struct{}) ([]st
 	return normalized, nil
 }
 
-func validateOrderBy(orderBy []string, valid map[string]struct{}) ([]string, error) {
+func validateOrderBy(orderBy []string, schema []TableColumn) ([]string, error) {
+	valid := columnSet(schema)
 	normalized := make([]string, 0, len(orderBy))
 
 	for _, raw := range orderBy {
@@ -431,7 +503,7 @@ func validateOrderBy(orderBy []string, valid map[string]struct{}) ([]string, err
 
 		column := parts[0]
 		if _, ok := valid[column]; !ok {
-			return nil, fmt.Errorf("unknown order_by column: %s", column)
+			return nil, unknownColumnError("order_by column", column, schema)
 		}
 
 		if len(parts) == 1 {
@@ -692,8 +764,7 @@ func (e *Executor) QueryTable(ctx context.Context, tableName string, columns []s
 		return nil, err
 	}
 
-	validColumns := columnSet(schema)
-	columns, err = validateSelectedColumns(columns, validColumns)
+	columns, err = validateSelectedColumns(columns, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -703,7 +774,7 @@ func (e *Executor) QueryTable(ctx context.Context, tableName string, columns []s
 		return nil, err
 	}
 
-	orderBy, err = validateOrderBy(orderBy, validColumns)
+	orderBy, err = validateOrderBy(orderBy, schema)
 	if err != nil {
 		return nil, err
 	}

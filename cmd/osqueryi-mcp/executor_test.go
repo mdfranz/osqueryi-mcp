@@ -106,6 +106,18 @@ func TestCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSimilarTables(t *testing.T) {
+	tables := []string{"interface_addresses", "interface_details", "processes", "users"}
+
+	got := similarTables("interfaces_addresses", tables)
+	if len(got) == 0 || got[0] != "interface_addresses" {
+		t.Errorf("similarTables(interfaces_addresses) = %v, want interface_addresses first", got)
+	}
+	if got := similarTables("signed_system_files", tables); len(got) != 0 {
+		t.Errorf("similarTables with no near miss = %v, want none", got)
+	}
+}
+
 func TestValidationAndTruncation(t *testing.T) {
 	if err := (&Executor{}).validateTableName("users_2"); err != nil {
 		t.Fatalf("valid table name rejected: %v", err)
@@ -116,14 +128,24 @@ func TestValidationAndTruncation(t *testing.T) {
 		}
 	}
 
-	valid := map[string]struct{}{"uid": {}, "username": {}}
-	if _, err := validateSelectedColumns([]string{"missing"}, valid); err == nil {
+	schema := []TableColumn{{Name: "uid"}, {Name: "username"}}
+	// The valid-column list in the message is what lets a model retry without a describe_table
+	// round trip, so assert on it rather than just on err != nil.
+	_, err := validateSelectedColumns([]string{"missing"}, schema)
+	if err == nil {
 		t.Error("unknown selected column was accepted")
+	} else if !strings.Contains(err.Error(), "uid, username") {
+		t.Errorf("unknown column error omits valid columns: %v", err)
 	}
-	if got, err := validateOrderBy([]string{"uid desc"}, valid); err != nil || !reflect.DeepEqual(got, []string{"uid DESC"}) {
+	if got, err := validateOrderBy([]string{"uid desc"}, schema); err != nil || !reflect.DeepEqual(got, []string{"uid DESC"}) {
 		t.Fatalf("order by = %v, %v", got, err)
 	}
-	if _, err := validateOrderBy([]string{"uid sideways"}, valid); err == nil {
+	if _, err := validateOrderBy([]string{"missing desc"}, schema); err == nil {
+		t.Error("unknown order_by column was accepted")
+	} else if !strings.Contains(err.Error(), "uid, username") {
+		t.Errorf("unknown order_by column error omits valid columns: %v", err)
+	}
+	if _, err := validateOrderBy([]string{"uid sideways"}, schema); err == nil {
 		t.Error("invalid order direction was accepted")
 	}
 	if _, err := validateWhereClause("uid = 1; DROP TABLE users"); err == nil {
