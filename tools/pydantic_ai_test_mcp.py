@@ -150,6 +150,7 @@ async def run_pydantic_ai_mcp(requested_model: str):
     logger.info(f"Using model: {model_name}")
     system_prompt, tasks = load_prompt_suite()
 
+    stats = RunStats()
     hooks = Hooks()
 
     @hooks.on.after_model_request
@@ -176,9 +177,11 @@ async def run_pydantic_ai_mcp(requested_model: str):
             total_tokens=_total_tokens(usage),
             cache_read_tokens=usage.cache_read_tokens,
         )
+        # Accumulate here rather than from result.usage so a task that raises still reports what
+        # it spent: the tokens are just as real when the run ends in an error, and that is
+        # exactly when the cost is worth seeing.
+        stats.update(usage)
         return response
-
-    stats = RunStats()
 
     # Without an explicit env, the mcp SDK spawns the subprocess with only
     # HOME/LOGNAME/PATH/SHELL/TERM/USER inherited (a safety default) — silently dropping
@@ -230,19 +233,22 @@ async def run_pydantic_ai_mcp(requested_model: str):
                         elapsed_ms = (time.perf_counter() - start) * 1000
                         failed_tasks.append(title)
                         logger.error(f"[TASK FAILED] {title}: {e}")
+                        logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
                         logfire.error(
                             "Task failed: {title}",
                             title=title,
                             error=str(e),
                             error_type=type(e).__name__,
                             elapsed_ms=elapsed_ms,
+                            input_tokens=stats.task_tokens.input_tokens,
+                            output_tokens=stats.task_tokens.output_tokens,
+                            total_tokens=stats.task_tokens.total_tokens,
+                            cache_read_tokens=stats.task_tokens.cache_read_tokens,
                         )
                         continue
 
                     logger.info("\n[Final Answer]")
                     logger.info(result.output)
-
-                    stats.update(result.usage)
 
                     logger.info(f"[Token Totals] {stats.task_tokens.summary()}")
                     elapsed_ms = (time.perf_counter() - start) * 1000
