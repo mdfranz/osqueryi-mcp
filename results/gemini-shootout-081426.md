@@ -1,7 +1,5 @@
 # Gemini Flash MCP Shootout — 2026-08-14
 
-Source: [EU Logfire `mcp-eval` project](https://logfire-eu.pydantic.dev/last-name-franz/mcp-eval/).
-
 ## Scope
 
 This review covers six completed serial benchmark runs of
@@ -10,10 +8,11 @@ This review covers six completed serial benchmark runs of
 traces ran between 23:08 and 23:21 UTC on 2026-08-14. An earlier failed
 attempt using the invalid model ID `gemini-3.6` is excluded.
 
-It also includes two completed OpenRouter/DeepSeek V4 Flash suites and three
-completed OpenAI GPT-5.6 Terra suites, described in the later comparison
-sections. The differing repetition counts are retained rather than normalized:
-Gemini and DeepSeek have two suites each; Terra has three.
+It also includes two completed OpenRouter/DeepSeek V4 Flash suites, three
+completed OpenRouter/DeepSeek V4 Pro suites, and three completed OpenAI
+GPT-5.6 Terra suites, described in the later comparison sections. The
+differing repetition counts are retained rather than normalized: Gemini and
+DeepSeek Flash have two suites each; DeepSeek Pro and Terra have three.
 
 Every task completed in all reviewed suites.
 
@@ -37,10 +36,19 @@ At the family level:
 - **OpenAI GPT-5.6 Terra:** fewest model turns and lowest token use, with
   consistently careful evidence and uncertainty language. Choose it where
   token cost and defensible reporting matter more than absolute latency.
-- **DeepSeek V4 Flash via OpenRouter:** detailed and readable, but a poor fit
-  for a strict tool/table budget. It averaged 63 MCP calls and 418.3 seconds
-  per suite, repeatedly re-querying and broadening the investigation beyond
-  the requested scope.
+- **DeepSeek V4 via OpenRouter:** Pro is a substantial improvement on Flash
+  (176,077 vs. 348,166 mean tokens; 261.7 vs. 418.3 seconds), but both remain
+  poor fits for a strict tool/table budget. Pro averaged 41.3 MCP calls per
+  suite and Flash 63.0; both frequently broadened the investigation beyond
+  the requested scope. Flash also needed two aborted attempts before its two
+  counted suites completed cleanly — see the Independent validation appendix.
+
+An independent re-query of the Logfire traces on 2026-08-14 confirmed every
+token, time, and MCP-call figure in this report to the exact number, and
+confirmed the excluded invalid-model run. It also surfaced one gap this
+report now corrects: DeepSeek's two counted suites followed two earlier
+aborted attempts, not disclosed in the original write-up. Full methodology
+is in the appendix at the end of this report.
 
 ### Visual comparison
 
@@ -50,12 +58,14 @@ At the family level:
 
 ![Mean MCP calls by task and model.](gemini-shootout-task-tool-calls.png)
 
+![Process starts versus completed suites per model; DeepSeek needed two aborted attempts before its two counted suites completed.](gemini-shootout-reliability.png)
+
 | Decision | Recommended model | Why |
 |---|---|---|
 | Fastest bounded investigation | `gemini-3.7-flash` | Lowest suite latency; sound constraint discipline |
 | Lowest token use / cautious reporting | `openai:gpt-5.6-terra` | Lowest tokens and model turns; clear uncertainty handling |
 | More deliberate Gemini alternative | `gemini-3.6-flash` | Controlled middle ground, albeit much more token-heavy than Terra |
-| Avoid for bounded default | `gemini-3.5-flash`, DeepSeek V4 Flash | Frequent over-exploration; DeepSeek also has very high latency |
+| Avoid for bounded default | `gemini-3.5-flash`, DeepSeek V4 Flash/Pro | Frequent over-exploration; DeepSeek also has high latency |
 
 These are execution-quality findings, not a semantic ground-truth score: the
 traces establish completion, latency, token use, tool behavior, and prompt
@@ -271,6 +281,12 @@ Logfire project between 23:41 and 23:57 UTC. All eight tasks completed. This
 section is an additional comparison point; the filename remains unchanged
 because the Gemini results above are the original shootout scope.
 
+Reaching these two clean suites actually took four process starts: two
+earlier DeepSeek attempts stalled with zero completed tasks and were
+silently abandoned before the two counted runs below. This does not change
+any metric in this section — see the Independent validation appendix at the
+end of this report for the full detail.
+
 | Model | Suites | Mean model turns / suite | Mean MCP calls / suite | Mean tokens / suite | Mean task time / suite |
 |---|---:|---:|---:|---:|---:|
 | `deepseek/deepseek-v4-flash` via OpenRouter | 2 | 29.5 | 63.0 | 348,166 | 418.3 s |
@@ -351,6 +367,87 @@ has substantially higher end-to-end latency than the three Gemini models.
 `gemini-3.7-flash` remains the preferred default; 3.6 remains the more
 conservative alternative when somewhat richer investigation is desired.
 
+## OpenRouter DeepSeek V4 Pro comparison
+
+Three serial `openrouter:deepseek/deepseek-v4-pro` suites completed in the EU
+Logfire project between 00:56 and 01:17 UTC on 2026-08-15. All twelve tasks
+completed. Unlike the earlier Flash result, all three requested Pro process
+starts completed cleanly.
+
+| Run | Model turns | MCP calls | Total tokens | Task time |
+|---|---:|---:|---:|---:|
+| 1 | 23 | 51 | 253,523 | 324.7 s |
+| 2 | 22 | 43 | 162,301 | 280.1 s |
+| 3 | 16 | 30 | 112,408 | 180.3 s |
+| **Mean** | **20.3** | **41.3** | **176,077** | **261.7 s** |
+
+| Model | Suites | Mean model turns / suite | Mean MCP calls / suite | Mean tokens / suite | Mean task time / suite |
+|---|---:|---:|---:|---:|---:|
+| `deepseek/deepseek-v4-pro` via OpenRouter | 3 | 20.3 | 41.3 | 176,077 | 261.7 s |
+| `deepseek/deepseek-v4-flash` via OpenRouter | 2 | 29.5 | 63.0 | 348,166 | 418.3 s |
+| `gemini-3.7-flash` | 2 | 21.5 | 30.0 | 129,373 | 56.3 s |
+| `openai:gpt-5.6-terra` | 3 | 15.3 | 35.0 | 70,638 | 89.2 s |
+
+Pro is a clear improvement over DeepSeek Flash: 49% fewer tokens, 34% fewer
+MCP calls, 31% fewer model turns, and 37% lower task time. It is nevertheless
+4.6× slower than Gemini 3.7 and 2.9× slower than Terra. Its mean token use is
+36% above Gemini 3.7 and 2.5× Terra's.
+
+### DeepSeek V4 Pro task-level means
+
+| Task | Mean time | Mean tokens | Mean model turns | Mean MCP calls |
+|---|---:|---:|---:|---:|
+| Structured discovery | 42.6 s | 16,501 | 5.0 | 11.7 |
+| Single-table query | 32.2 s | 12,875 | 3.3 | 2.3 |
+| Join-heavy workload | 39.0 s | 18,075 | 3.3 | 5.0 |
+| Ambiguous classification | 147.9 s | 128,627 | 8.7 | 22.3 |
+
+### Tool behavior
+
+- **Structured discovery:** 14 `search_tables` and 20 `preview_table` calls
+  across the three runs. Pro discovers broadly and previews every candidate;
+  this is more expensive than Terra's 9.3 calls per run but materially more
+  restrained than Flash's 18 calls per run.
+- **Single-table query:** three previews and four `query_table` calls. Two
+  runs used the intended two-call pattern; the first issued an unnecessary
+  unrestricted `on_disk = 1` query before the requested five-row projection.
+- **Join-heavy workload:** three previews and 12 `run_query` calls. The first
+  and third runs made the required joins directly; the second added three
+  previews and extra listener aggregations.
+- **Ambiguous classification:** three `list_tables`, 29 previews, 18
+  structured queries, and 17 SQL queries—67 calls overall. The first run made
+  33 calls, exceeding the prompt's roughly-20-call constraint substantially;
+  the latter two held to 17 calls and eight tables each.
+
+### Qualitative notes and assessment
+
+Pro's reports are detailed, readable, and generally surface the key limitation
+that process eventing is disabled. The third ambiguous answer, for example,
+states:
+
+> “`process_events` returned **zero rows** — osqueryd eventing is **not
+> enabled**.”
+
+It also improves on Flash by making the unresolved listener explicit:
+
+> “**52739** | TCP | **0.0.0.0** | **pid `-1` (unmapped)** | **Unknown — only
+> unresolved outlier**”
+
+However, evidentiary discipline is uneven. The first run concludes that the
+unattributed listener is “**almost certainly** a ChromeOS host service or
+Tailscale component”; the trace establishes neither owner. In the join task,
+the third run calls code-server “exactly one actual network listener” after an
+inner join that necessarily drops the `pid = -1` listeners. The correct claim
+is one *process-attributed* network listener, not one listener overall.
+
+Pro is a meaningful improvement within the DeepSeek family and its final two
+ambiguous runs meet the prompt's scope limits. Still, the first run's 33 calls,
+the high latency, and occasional overconfident attributions make it unsuitable
+as the default bounded-investigation model. It is a stronger DeepSeek option
+than Flash when detailed narrative matters, but Gemini 3.7 remains the speed
+and constraint-discipline default and Terra remains the token-efficient,
+evidence-cautious alternative.
+
 ## OpenAI GPT-5.6 Terra comparison
 
 Three serial `openai:gpt-5.6-terra` suites completed in the EU Logfire project
@@ -427,3 +524,73 @@ assessment and separating observed process/socket relationships from missing
 historical or attribution evidence. The third response did broaden to 20
 calls, but still honored the stated limit; no Terra ambiguous run showed the
 large scope overrun seen with Gemini 3.5 or DeepSeek.
+
+## Appendix: Independent validation (2026-08-14, post-publication)
+
+The figures in this report were re-derived directly from the Logfire
+`mcp-eval` project via `query_run` and cross-checked against the local
+`pydantic_ai_test.log`, independent of the numbers already written into this
+report.
+
+- **Token and time totals match exactly.** Summing the `Task completed`
+  spans' `total_tokens` and `elapsed_ms` for `gemini-3.5-flash` reproduces
+  993,285 tokens / 326.6 s. The same recomputation for `gemini-3.7-flash`'s
+  four task-level means (13.5 s/13,477 tok; 7.9 s/8,791 tok; 11.0 s/26,058
+  tok; 23.9 s/81,048 tok) and for all three `openai:gpt-5.6-terra` runs'
+  `[Overall Token Totals]` lines (72,738 / 55,044 / 84,131 tokens; 92.1 s /
+  82.8 s / 92.5 s) matches this report to the number.
+- **DeepSeek V4 Pro is trace-derived.** The three completed suites sum to
+  253,523 / 162,301 / 112,408 tokens and 324.7 / 280.1 / 180.3 seconds.
+  Their matching `execute_tool` spans give 51 / 43 / 30 MCP calls; the report
+  uses their unweighted three-suite means.
+- **MCP call counts match exactly.** Counting raw `MCP request: tools/call *`
+  spans in the two `gemini-3.7-flash` ambiguous-task windows gives 11 (8
+  `preview_table` + 3 `query_table`) and 15 (8 `preview_table` + 7
+  `query_table`) — identical to the report's claimed counts and its
+  preview/structured-query split.
+- **The excluded invalid-model run is confirmed.** The `google:gemini-3.6`
+  attempt at 23:06:57 UTC failed all four tasks in under a second each with
+  `ModelHTTPError 404` (`models/gemini-3.6 is not found`), matching the
+  report's stated exclusion.
+- **Charts reviewed.** `generate_gemini_shootout_charts.py` hardcodes the
+  same suite/task means published in this report rather than re-querying
+  Logfire, so the original three PNGs inherit the accuracy confirmed above;
+  labels, units, and the "Gemini/Flash: n=2; Pro/Terra: n=3"
+  caption are all correct. A fourth chart, `gemini-shootout-reliability.png`
+  (process starts vs. completed suites per model), was added to visualize
+  the DeepSeek gap below. Regenerating the charts needs `matplotlib`,
+  `pandas`, and `numpy`, which aren't in the project's `pyproject.toml` —
+  run with `uv run --with matplotlib --with pandas --with numpy
+  results/generate_gemini_shootout_charts.py`.
+- **Gap found — DeepSeek attempt count was undercounted.** Getting the two
+  clean DeepSeek suites took four process starts, not two. Logfire and the
+  local log both show two earlier DeepSeek attempts that produced no
+  completed task and were silently abandoned before the two counted runs:
+  - **22:58:39 UTC** — reached four model turns into "Structured discovery"
+    (`search_tables`/`preview_table` calls), sent one further request to
+    OpenRouter at 22:59:18, then produced no response, no error, no
+    exception, and no task-completed/failed event. The next Logfire record
+    is a new process starting 7.5 minutes later, so this attempt was
+    evidently killed mid-request rather than finishing.
+  - **23:40:35 UTC (local log only)** — started, logged
+    `Currently retrying 1 failed export(s)` from the Logfire SDK itself, and
+    was abandoned after roughly 70 seconds with no completed task. This one
+    looks more like a local telemetry-export hiccup than a
+    DeepSeek/OpenRouter fault, but it still consumed an attempt.
+
+  Only after these two aborted starts did the 23:41:45 and 23:49:24 UTC runs
+  complete cleanly. No comparable hidden failures or restarts were found for
+  any Gemini or Terra run in this comparison — each of those completed on
+  its first attempt. This does not change any metric in this report (which
+  are correctly computed from the two completed DeepSeek suites), but it is
+  a relevant, previously undisclosed reliability data point: DeepSeek needed
+  two restarts to produce the two suites analyzed here, versus zero restarts
+  for every other model in this review. See
+  `gemini-shootout-reliability.png` for a visual summary.
+- **pydantic-ai version confirmed uniform.** `pydantic-ai/2.30.0` is the only
+  version string that appears anywhere in `pydantic_ai_test.log` — taken from
+  the `User-Agent` header pydantic-ai's own HTTP client sends on every model
+  request — and that log file spans the full session (18:58–20:16 local /
+  22:58–00:16 UTC on 2026-08-14/15), covering every Gemini, DeepSeek
+  (including the two aborted attempts), and Terra run in this report. There
+  is no version drift across models to account for.

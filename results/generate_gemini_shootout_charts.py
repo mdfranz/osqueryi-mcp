@@ -1,8 +1,9 @@
 """Generate reproducible charts for gemini-shootout-081426.md.
 
 The values below are the suite and task means recorded in the accompanying
-report from the EU Logfire `mcp-eval` project. Gemini and DeepSeek are based on
-two suites per model; GPT-5.6 Terra is based on three.
+report from the EU Logfire `mcp-eval` project. Gemini and DeepSeek Flash are
+based on two suites per model; DeepSeek Pro and GPT-5.6 Terra are based on
+three.
 """
 
 from pathlib import Path
@@ -21,6 +22,7 @@ MODEL_SUMMARY = pd.DataFrame(
         ("Gemini 3.7 Flash", "Google Gemini", 2, 21.5, 30.0, 129_373, 56.3),
         ("GPT-5.6 Terra", "OpenAI", 3, 15.3, 35.0, 70_638, 89.2),
         ("DeepSeek V4 Flash", "DeepSeek / OpenRouter", 2, 29.5, 63.0, 348_166, 418.3),
+        ("DeepSeek V4 Pro", "DeepSeek / OpenRouter", 3, 20.3, 41.3, 176_077, 261.7),
     ],
     columns=["model", "family", "suites", "turns", "calls", "tokens", "seconds"],
 )
@@ -47,6 +49,10 @@ TASK_METRICS = pd.DataFrame(
         ("Ambiguous classification", "Gemini 3.7 Flash", 23.9, 81_048, 13.0),
         ("Ambiguous classification", "GPT-5.6 Terra", 44.0, 45_312, 19.3),
         ("Ambiguous classification", "DeepSeek V4 Flash", 184.9, 249_912, 33.0),
+        ("Structured discovery", "DeepSeek V4 Pro", 42.6, 16_501, 11.7),
+        ("Single-table query", "DeepSeek V4 Pro", 32.2, 12_875, 2.3),
+        ("Join-heavy workload", "DeepSeek V4 Pro", 39.0, 18_075, 5.0),
+        ("Ambiguous classification", "DeepSeek V4 Pro", 147.9, 128_627, 22.3),
     ],
     columns=["task", "model", "seconds", "tokens", "calls"],
 )
@@ -59,7 +65,31 @@ COLORS = {
     "Gemini 3.7 Flash": "#1f9d8a",
     "GPT-5.6 Terra": "#f28e2b",
     "DeepSeek V4 Flash": "#e15759",
+    "DeepSeek V4 Pro": "#b31b34",
 }
+SCATTER_LABELS = {
+    "Gemini 3.5 Flash": "Gemini 3.5",
+    "Gemini 3.6 Flash": "Gemini 3.6",
+    "Gemini 3.7 Flash": "Gemini 3.7",
+}
+STATUS_CRITICAL = "#d03b3b"  # reserved status color; aborted attempts, never a series
+
+# Process starts per model vs. suites that actually completed, per the
+# independent Logfire review (see "Independent validation" in the report).
+# Only DeepSeek needed restarts: a silent mid-task hang at 22:58:39 UTC and a
+# Logfire-export-retry stall at 23:40:35 UTC, both abandoned with zero
+# completed tasks, before the two counted runs went clean.
+RELIABILITY = pd.DataFrame(
+    [
+        ("Gemini 3.5 Flash", 2, 0),
+        ("Gemini 3.6 Flash", 2, 0),
+        ("Gemini 3.7 Flash", 2, 0),
+        ("GPT-5.6 Terra", 3, 0),
+        ("DeepSeek V4 Flash", 2, 2),
+        ("DeepSeek V4 Pro", 3, 0),
+    ],
+    columns=["model", "completed", "aborted"],
+)
 
 
 def configure_style() -> None:
@@ -95,7 +125,7 @@ def suite_efficiency_chart() -> None:
             zorder=3,
         )
         ax.annotate(
-            row.model.replace(" Flash", ""),
+            SCATTER_LABELS.get(row.model, row.model),
             (row.seconds, row.tokens),
             xytext=(7, 5),
             textcoords="offset points",
@@ -108,7 +138,7 @@ def suite_efficiency_chart() -> None:
     ax.text(
         0.01,
         -0.22,
-        "Bubble area = mean MCP calls. Lower-left is preferable. Gemini and DeepSeek: n=2 suites; Terra: n=3.",
+        "Bubble area = mean MCP calls. Lower-left is preferable. Gemini/Flash: n=2; Pro/Terra: n=3.",
         transform=ax.transAxes,
         fontsize=8.5,
         color="#546e7a",
@@ -128,7 +158,7 @@ def task_metric_chart(metric: str, ylabel: str, title: str, filename: str) -> No
             .loc[TASKS, metric]
         )
         bars = ax.bar(
-            x + (index - 2) * width,
+            x + (index - (len(MODELS) - 1) / 2) * width,
             values,
             width,
             label=model,
@@ -142,6 +172,59 @@ def task_metric_chart(metric: str, ylabel: str, title: str, filename: str) -> No
     ax.legend(ncol=3, loc="upper left", fontsize=8)
     ax.grid(axis="y", alpha=0.35)
     save(fig, filename)
+
+
+def reliability_chart() -> None:
+    fig, ax = plt.subplots(figsize=(8.5, 5))
+    x = np.arange(len(RELIABILITY))
+    width = 0.55
+
+    completed = RELIABILITY["completed"].to_numpy()
+    aborted = RELIABILITY["aborted"].to_numpy()
+    bar_colors = [COLORS[m] for m in RELIABILITY["model"]]
+
+    ax.bar(x, completed, width, color=bar_colors, zorder=3, label="_nolegend_")
+    ax.bar(
+        x,
+        aborted,
+        width,
+        bottom=completed,
+        color=STATUS_CRITICAL,
+        hatch="////",
+        edgecolor="white",
+        linewidth=0.8,
+        zorder=3,
+        label="Aborted attempt (0 tasks completed)",
+    )
+
+    for i, (c, a) in enumerate(zip(completed, aborted)):
+        ax.text(i, c / 2, str(c), ha="center", va="center", fontsize=9, color="white", fontweight="bold")
+        if a:
+            ax.text(i, c + a / 2, str(a), ha="center", va="center", fontsize=9, color="white", fontweight="bold")
+
+    # Proxy handle for the completed segment so the legend names both
+    # segments explicitly rather than leaning on color alone.
+    from matplotlib.patches import Patch
+
+    handles = [
+        Patch(facecolor="#90a4ae", label="Completed suite"),
+        Patch(facecolor=STATUS_CRITICAL, hatch="////", edgecolor="white", label="Aborted attempt (0 tasks completed)"),
+    ]
+    ax.legend(handles=handles, loc="upper left", fontsize=8.5)
+
+    ax.set_xticks(x, [m.replace(" Flash", "") for m in RELIABILITY["model"]])
+    ax.set_ylabel("Process starts")
+    ax.set_title("Run reliability: process starts vs. completed suites")
+    ax.grid(axis="y", alpha=0.35)
+    ax.text(
+        0.01,
+        -0.14,
+        "Aborted = process started, zero tasks completed, silently abandoned before a later restart succeeded.",
+        transform=ax.transAxes,
+        fontsize=8.5,
+        color="#546e7a",
+    )
+    save(fig, "gemini-shootout-reliability.png")
 
 
 def main() -> None:
@@ -159,6 +242,7 @@ def main() -> None:
         "Tool-call discipline by task",
         "gemini-shootout-task-tool-calls.png",
     )
+    reliability_chart()
 
 
 if __name__ == "__main__":
