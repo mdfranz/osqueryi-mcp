@@ -68,6 +68,12 @@ PROVIDERS = [
         "openrouter:",
         ("OPENROUTER_API_KEY",),
     ),
+    # No bare-prefix entry for Ollama: its own model tags routinely contain a colon
+    # (e.g. "gemma4:e4b", "llama3.2:1b"), which the ":" in name check below would
+    # misread as an already-prefixed "provider:model" string. So Ollama models must
+    # be passed explicitly as "ollama:<tag>" (e.g. "ollama:gemma4:e4b") — that already
+    # flows through unmodified since it contains a colon. No API key is required;
+    # OLLAMA_BASE_URL just needs to point at a running server (defaulted below).
 ]
 
 
@@ -135,10 +141,14 @@ class RunStats:
         self.overall_tokens.add(usage)
 
 
-async def run_pydantic_ai_mcp(requested_model: str):
+async def run_pydantic_ai_mcp(requested_model: str, task_id: str | None = None):
     server_path = shutil.which("osqueryi-mcp")
     os.environ.setdefault("OSQUERYI_LOCKFILE", "off")
     os.environ.setdefault("OSQUERYI_LOGFILE", "off")
+    # pydantic-ai's OllamaProvider raises UserError if this is unset, even for a purely
+    # local server — it has no other way to find it. Ollama's OpenAI-compatible route
+    # lives under /v1; an explicit OLLAMA_BASE_URL in the environment still wins.
+    os.environ.setdefault("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
     if not server_path:
         raise RuntimeError("osqueryi-mcp not found in PATH")
@@ -149,6 +159,12 @@ async def run_pydantic_ai_mcp(requested_model: str):
 
     logger.info(f"Using model: {model_name}")
     system_prompt, tasks = load_prompt_suite()
+    if task_id is not None:
+        # Slow local models (Ollama on CPU, etc.) make the full suite expensive just to
+        # sanity-check a change — let the caller run one task by its prompts-TOML id.
+        tasks = tuple(t for t in tasks if t.id == task_id)
+        if not tasks:
+            raise RuntimeError(f"no task with id {task_id!r} in the prompt suite")
 
     stats = RunStats()
     hooks = Hooks()
@@ -288,4 +304,5 @@ async def run_pydantic_ai_mcp(requested_model: str):
 if __name__ == "__main__":
     default_model = "claude-haiku-4-5"
     model = sys.argv[1] if len(sys.argv) > 1 else default_model
-    asyncio.run(run_pydantic_ai_mcp(model))
+    task_id = sys.argv[2] if len(sys.argv) > 2 else None
+    asyncio.run(run_pydantic_ai_mcp(model, task_id))

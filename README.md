@@ -211,6 +211,13 @@ Set the API key for the selected provider: `OPENAI_API_KEY` for OpenAI,
 server logfile to `off` so they can start their own temporary stdio server;
 explicitly supplied environment values take precedence.
 
+The Pydantic AI harness also runs against a local [Ollama](https://ollama.com)
+server: pass the model as `ollama:<tag>` (e.g. `uv run tools/pydantic_ai_test_mcp.py
+ollama:gemma4:e4b`) — the explicit prefix is required since Ollama tags
+themselves contain a colon (`llama3.2:1b`). No API key is needed; it defaults
+`OLLAMA_BASE_URL` to `http://localhost:11434/v1`, overridable if Ollama runs
+elsewhere.
+
 When telemetry is enabled, Logfire receives the current 12-character Git
 revision as `service.version` for both the server and framework harnesses. Set
 `OSQUERYI_GIT_REVISION` when running a harness outside a Git checkout.
