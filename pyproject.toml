@@ -10,7 +10,7 @@ dependencies = [
     "logfire[system-metrics]>=4.40.0",
     "openai>=2.46.0",
     "openinference-instrumentation-agno>=1.0.1",
-    "pydantic-ai>=2.13.0",
+    "pydantic-ai>=2.56.0",
     "strands-agents>=1.48.0",
 ]
 
